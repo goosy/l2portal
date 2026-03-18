@@ -1,0 +1,21 @@
+# Rust build output
+/target/
+
+# External dependency binaries (added manually — not tracked in git)
+/deps/
+
+# Inno Setup compiled installer output
+/dist/
+
+# OS / editor artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/settings.json
+*.suo
+*.user
+
+# Windows shortcuts
+*.lnk
