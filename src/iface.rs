@@ -242,8 +242,9 @@ fn build_windows_adapter_map() -> Result<HashMap<String, WinAdapterMeta>> {
 #[cfg(target_os = "windows")]
 fn get_friendly_name(if_index: u32) -> Option<String> {
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToAlias, NET_LUID_LH,
+        ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToAlias,
     };
+    use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 
     unsafe {
         let mut luid: NET_LUID_LH = std::mem::zeroed();
@@ -278,7 +279,8 @@ fn extract_guid(npf_name: &str) -> Option<&str> {
 }
 
 /// Convert a null-terminated C byte array to a Rust String.
-fn c_bytes_to_string(bytes: &[u8]) -> String {
+fn c_bytes_to_string(bytes: &[i8]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
+    let u8_slice: Vec<u8> = bytes[..end].iter().map(|&b| b as u8).collect();
+    String::from_utf8_lossy(&u8_slice).into_owned()
 }
