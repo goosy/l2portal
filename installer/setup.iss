@@ -5,11 +5,14 @@
 ; Expected layout at compile time (relative to this .iss file's parent = project root):
 ;   target\release\l2portal.exe
 ;   deps\tap\tapctl.exe
-;   deps\tap\devcon.exe
+;   deps\tap\amd64\devcon.exe
 ;   deps\tap\amd64\OemVista.inf
 ;   deps\tap\amd64\tap0901.cat
 ;   deps\tap\amd64\tap0901.sys
 ;   deps\npcap\installer\npcap-1.75.exe
+;
+; install command:
+;   devcon.exe install OemVista.inf tap0901
 
 #define MyAppName      "L2Portal"
 #define MyAppVersion   "0.1.0"
@@ -25,9 +28,7 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={#MyAppDir}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
-; Require administrator for driver installation.
 PrivilegesRequired=admin
-; Output installer file.
 OutputDir=..\dist
 OutputBaseFilename=L2Portal-{#MyAppVersion}-Setup
 Compression=lzma2/ultra
@@ -49,13 +50,12 @@ Source: "..\target\release\l2portal.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; TAP management tool (deployed alongside l2portal.exe).
 Source: "..\deps\tap\tapctl.exe"; DestDir: "{app}"; Flags: ignoreversion
 
-; devcon.exe kept in app dir for uninstall use.
-Source: "..\deps\tap\devcon.exe"; DestDir: "{app}"; Flags: ignoreversion
-
-; TAP driver files extracted to a temp sub-dir for installation.
-Source: "..\deps\tap\amd64\OemVista.inf"; DestDir: "{app}\tap-driver\amd64"; Flags: ignoreversion
-Source: "..\deps\tap\amd64\tap0901.cat";  DestDir: "{app}\tap-driver\amd64"; Flags: ignoreversion
-Source: "..\deps\tap\amd64\tap0901.sys";  DestDir: "{app}\tap-driver\amd64"; Flags: ignoreversion
+; TAP driver files and devcon.exe — all deployed together under {app}\amd64\.
+; so that "devcon.exe install OemVista.inf tap0901" can find both the inf and sys files.
+Source: "..\deps\tap\amd64\devcon.exe";   DestDir: "{app}\amd64"; Flags: ignoreversion
+Source: "..\deps\tap\amd64\OemVista.inf"; DestDir: "{app}\amd64"; Flags: ignoreversion
+Source: "..\deps\tap\amd64\tap0901.cat";  DestDir: "{app}\amd64"; Flags: ignoreversion
+Source: "..\deps\tap\amd64\tap0901.sys";  DestDir: "{app}\amd64"; Flags: ignoreversion
 
 ; npcap installer (extracted to temp, run silently, then deleted).
 Source: "..\deps\npcap\installer\npcap-1.75.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
@@ -111,21 +111,24 @@ begin
 end;
 
 // ─── Install TAP-Windows6 driver if not already present ────────────────────
+// devcon.exe, OemVista.inf, tap0901.cat and tap0901.sys
+// are all deployed to {app}\amd64\. 
+// Command: devcon.exe install OemVista.inf tap0901
 procedure InstallTapDriverIfNeeded();
 var
   SysDriverPath: string;
   ResultCode: integer;
-  DevconPath, InfPath: string;
+  DevconPath, WorkDir: string;
 begin
   SysDriverPath := ExpandConstant('{sys}\drivers\tap0901.sys');
   if not FileExists(SysDriverPath) then begin
     Log('TAP driver not found — installing via devcon');
-    DevconPath := ExpandConstant('{app}\devcon.exe');
-    InfPath    := ExpandConstant('{app}\tap-driver\amd64\OemVista.inf');
-    Exec(DevconPath, 'install "' + InfPath + '" tap0901', '',
-         SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    DevconPath := ExpandConstant('{app}\amd64\devcon.exe');
+    WorkDir    := ExpandConstant('{app}\amd64');
+    Exec(DevconPath, 'install OemVista.inf tap0901',
+         WorkDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
     if (ResultCode <> 0) and (ResultCode <> 1) then begin
-      // devcon returns 1 for "reboot required" — that is acceptable.
+      // devcon exits 1 when a reboot is required — that is acceptable.
       MsgBox('TAP driver installation returned code ' + IntToStr(ResultCode) +
              '. A reboot may be required, or the driver may not have installed correctly.',
              mbError, MB_OK);
@@ -195,7 +198,7 @@ begin
 
     // Remove TAP driver if checked.
     if Assigned(UninstTapCheck) and UninstTapCheck.Checked then begin
-      Exec(ExpandConstant('{app}\devcon.exe'), 'remove tap0901', '',
+      Exec(ExpandConstant('{app}\amd64\devcon.exe'), 'remove tap0901', '',
            SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end;
   end;

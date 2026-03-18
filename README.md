@@ -62,20 +62,20 @@ Or use the provided script (also compiles the installer):
 ### Required `deps/` layout (not tracked in git)
 
 ```
-deps/
-├── npcap/
-│   ├── installer/
-│   │   └── npcap-1.75.exe        # from https://npcap.com/#download
-│   └── sdk/
-│       ├── Include/
-│       └── Lib/x64/
-└── tap/
-    ├── amd64/
-    │   ├── OemVista.inf          # from tap-windows6 dist.win10.zip
-    │   ├── tap0901.cat
-    │   └── tap0901.sys
-    ├── devcon.exe                # from tap-windows6 dist.win10.zip
-    └── tapctl.exe                # extracted from OpenVPN installer MSI
+📂deps/
+ ├─📂npcap/                   # from https://npcap.com/#download
+ │  ├─📂installer/
+ │  │  └─📄npcap-x.xx.exe
+ │  └─📂sdk/
+ │     ├─📂Include/
+ │     └─📂Lib/
+ └─📂tap/
+    ├─📂amd64/                # from tap-windows6 dist.win10.zip
+    │  ├─📄OemVista.inf
+    │  ├─📄devcon.exe
+    │  ├─📄tap0901.cat
+    │  └─📄tap0901.sys
+    └─📄tapctl.exe            # extracted from OpenVPN installer MSI
 ```
 
 Sources:
@@ -89,7 +89,7 @@ At runtime, `l2portal.exe` requires:
 
 - **npcap** installed (for server mode)
 - **TAP-Windows6 driver** installed (for client mode)
-- **tapctl.exe** placed in the same directory as `l2portal.exe` (for client mode)
+- **tapctl.exe** in the same directory as `l2portal.exe`, or available on system PATH (for client mode)
 - Administrator privileges (UAC prompt appears automatically on launch)
 
 ## Environment Variables

@@ -131,9 +131,12 @@ packet-beta
 
 最终 `l2portal.exe` 为单一可执行文件，自动触发 UAC 提权，运行时自动创建/删除 TAP 网卡实例。
 
-- npcap 源: https://npcap.com/#download 下载 npcap-x.xx.exe 
-- npcap-sdk 源: https://npcap.com/#download 下载 npcap-sdk-x.xx.zip 
+- npcap 源: https://npcap.com/#download
+  下载 npcap-x.xx.exe 运行即安装
+- npcap-sdk 源: https://npcap.com/#download
+  下载 npcap-sdk-x.xx.zip 
 - TAP-Windows6 源: https://github.com/OpenVPN/tap-windows6/releases
+  下载 dist.win10.zip 运行 `devcon.exe`
 - tapctl.exe 源: https://openvpn.net/community/ 下载正确 OpenVPN MSI 安装包后单独解压 tapctl.exe
 
 ## 3. 命令行接口
@@ -254,19 +257,19 @@ Client 模式通过监听 stdin 命令支持运行时切换对端，无需重启
  ├─📂src/
  │  └─📄main.rs                  # 单一入口，内部分支
  ├─📂deps/
- │  ├─📂tap/
- │  │  ├─📂amd64/                # 该目录下文件都来自 dist.win10.zip
- │  │  │  ├─📄OemVista.inf
- │  │  │  ├─📄tap0901.cat
- │  │  │  ├─📄tap0901.sys
- │  │  │  └─📄devcon.exe         # 安装包调用一次
- │  │  └─📄tapctl.exe            # 从 OpenVPN 安装包提取，部署到目标机
- │  └─📂npcap/
- │     ├─📂installer/
- │     │  └─📄npcap-x.xx.exe
- │     └─📂sdk/
- │        ├─📂Include/
- │        └─📂Lib/
+ │  ├─📂npcap/
+ │  │  ├─📂installer/
+ │  │  │  └─📄npcap-x.xx.exe     # https://npcap.com/#download
+ │  │  └─📂sdk/
+ │  │     ├─📂Include/
+ │  │     └─📂Lib/
+ │  └─📂tap/
+ │     ├─📂amd64/                # 该目录下文件都来自 dist.win10.zip
+ │     │  ├─📄OemVista.inf
+ │     │  ├─📄tap0901.cat
+ │     │  ├─📄tap0901.sys
+ │     │  └─📄devcon.exe         # 安装包调用一次
+ │     └─📄tapctl.exe            # 从 OpenVPN 安装包提取，部署到目标机
  └─📂installer/
     └─📄setup.iss                # Inno Setup 脚本
 ```
@@ -708,21 +711,18 @@ async fn main() {
 
 安装包需包含以下文件：
 
-- `deps/npcap/installer/npcap-1.75.exe`：npcap 安装程序，安装阶段静默调用
-- `deps/tap/amd64/`（`OemVista.inf`、`tap0901.cat`、`tap0901.sys`）：TAP 驱动文件，安装阶段通过 `devcon.exe` 静默安装
-- `deps/tap/devcon.exe`：驱动安装及卸载工具，部署到目标机安装目录，供安装与卸载阶段调用
-- `target/release/l2portal.exe`：程序本体，部署到目标机安装目录
+- `deps/npcap/installer/npcap-x.xx.exe`：npcap 安装程序，安装阶段静默调用
+- `deps/tap/amd64/`（`OemVista.inf`、`tap0901.cat`、`tap0901.sys`、`devcon.exe`）：TAP 驱动文件，安装与卸载阶段调用 `devcon.exe`
 - `deps/tap/tapctl.exe`：TAP 实例管理工具，与 `l2portal.exe` 一同部署到安装目录
+- `target/release/l2portal.exe`：程序本体，部署到目标机安装目录
 
-#### 依赖存在性检测
+#### 依赖检测与安装
 
 安装时各依赖的安装步骤均应先检测是否已存在，已存在则跳过，避免重复安装或覆盖用户现有版本。检测方式如下：
 
 **npcap**：npcap 安装后会在注册表 `HKLM\SOFTWARE\WOW6432Node\Npcap` 下写入版本信息，Inno Setup 可通过读取该注册表键判断是否已安装。键存在则跳过，否则静默运行 `npcap-1.75.exe /S`。
 
-**TAP-Windows6 驱动**：驱动安装后，`tap0901.sys` 会被复制到系统驱动目录 `%SystemRoot%\System32\drivers\`。Inno Setup 检查该文件是否存在即可判断驱动是否已安装。文件存在则跳过，否则调用 `devcon.exe install amd64\OemVista.inf tap0901` 静默安装驱动。
-
-#### 安装步骤顺序
+**TAP-Windows6 驱动**：驱动安装后，`tap0901.sys` 会被复制到系统驱动目录 `%SystemRoot%\System32\drivers\`。Inno Setup 检查该文件是否存在即可判断驱动是否已安装。文件存在则跳过，否则调用 `devcon.exe install OemVista.inf tap0901` 静默安装驱动。
 
 ```
 1. 检测 npcap 是否已安装（查注册表）
@@ -738,7 +738,7 @@ async fn main() {
 4. 将安装目录加入系统 PATH
 ```
 
-#### 安装目录建议
+#### 主体安装
 
 建议默认安装到 `C:\Program Files\L2Portal\`，安装包同时创建开始菜单快捷方式（可选）。`tapctl.exe` 与 `l2portal.exe` 放在同一目录。程序运行时优先从 `l2portal.exe` 所在目录查找 `tapctl.exe`，若不存在则 fallback 到系统 PATH。
 

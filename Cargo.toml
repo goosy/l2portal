@@ -1,7 +1,7 @@
 [package]
 name    = "l2portal"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Lightweight L2 UDP tunnel bridge for Windows"
 authors = []
 

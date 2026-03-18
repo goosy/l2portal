@@ -1,6 +1,8 @@
 // src/tap.rs — TAP-Windows6 adapter lifecycle: create, configure, delete.
 //
-// tapctl.exe is located only in the same directory as l2portal.exe (no PATH fallback).
+// tapctl.exe lookup order:
+//   1. Same directory as l2portal.exe  (preferred; deployed by installer)
+//   2. System PATH fallback            (allows dev/testing without full install)
 // netsh is used for IP configuration and MTU.
 
 use anyhow::{anyhow, Result};
@@ -9,22 +11,29 @@ use std::process::Command;
 
 use crate::routing::prefix_to_mask;
 
-/// Resolve the path to tapctl.exe relative to the current executable.
-/// Returns an error if the file does not exist alongside l2portal.exe.
-fn tapctl_path() -> Result<std::path::PathBuf> {
-    let exe = std::env::current_exe()
-        .map_err(|e| anyhow!("[ERROR] tap: cannot determine exe path: {e}"))?;
-    let dir = exe
-        .parent()
-        .ok_or_else(|| anyhow!("[ERROR] tap: cannot determine exe directory"))?;
-    let tapctl = dir.join("tapctl.exe");
-    if !tapctl.exists() {
-        return Err(anyhow!(
-            "[ERROR] tap: tapctl.exe not found in '{}'",
-            dir.display()
-        ));
+/// Resolve the path to tapctl.exe.
+///
+/// Search order:
+///   1. Directory containing l2portal.exe — the normal installed layout.
+///   2. System PATH fallback — for development or non-standard installs.
+///
+/// Returns a bare filename "tapctl.exe" for the PATH case; Command::new
+/// will invoke the OS search at spawn time, and the OS error message will
+/// be clear if it is not found there either.
+fn tapctl_path() -> std::path::PathBuf {
+    // 1. Prefer the exe-adjacent copy.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("tapctl.exe");
+            if candidate.exists() {
+                log::debug!("tapctl found alongside exe: {}", candidate.display());
+                return candidate;
+            }
+        }
     }
-    Ok(tapctl)
+    // 2. Fall back to PATH resolution at spawn time.
+    log::debug!("tapctl.exe not found alongside exe, falling back to PATH");
+    std::path::PathBuf::from("tapctl.exe")
 }
 
 /// Create a new TAP adapter instance with the given name and set MTU=1400.
@@ -32,7 +41,7 @@ fn tapctl_path() -> Result<std::path::PathBuf> {
 /// Any pre-existing residual instance is expected to have been cleaned up
 /// by `state::cleanup_residue()` before this call.
 pub fn tap_create(name: &str) -> Result<()> {
-    let tapctl = tapctl_path()?;
+    let tapctl = tapctl_path();
     log::info!("creating TAP adapter '{}'", name);
 
     let status = Command::new(&tapctl)
@@ -72,13 +81,7 @@ pub fn tap_create(name: &str) -> Result<()> {
 
 /// Delete a TAP adapter instance by name.
 pub fn tap_delete(name: &str) -> Result<()> {
-    let tapctl = match tapctl_path() {
-        Ok(p) => p,
-        Err(e) => {
-            log::warn!("skipping delete — {e}");
-            return Ok(());
-        }
-    };
+    let tapctl = tapctl_path();
     log::info!("deleting TAP adapter '{}'", name);
     let status = Command::new(&tapctl)
         .args(["delete", "--name", name])
