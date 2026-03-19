@@ -9,9 +9,9 @@
 ;   deps\tap\amd64\OemVista.inf
 ;   deps\tap\amd64\tap0901.cat
 ;   deps\tap\amd64\tap0901.sys
-;   deps\npcap\installer\npcap-1.75.exe
+;   deps\npcap\installer\npcap-x.xx.exe   (filename kept current by build.ps1)
 ;
-; install command:
+; TAP driver install command (devcon and inf are in the same directory):
 ;   devcon.exe install OemVista.inf tap0901
 
 #define MyAppName      "L2Portal"
@@ -57,11 +57,11 @@ Source: "..\deps\tap\amd64\OemVista.inf"; DestDir: "{app}\amd64"; Flags: ignorev
 Source: "..\deps\tap\amd64\tap0901.cat";  DestDir: "{app}\amd64"; Flags: ignoreversion
 Source: "..\deps\tap\amd64\tap0901.sys";  DestDir: "{app}\amd64"; Flags: ignoreversion
 
-; npcap installer (extracted to temp, run silently, then deleted).
-Source: "..\deps\npcap\installer\npcap-1.75.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
+; npcap installer — filename is kept current by build.ps1 automatically.
+; When running iscc manually, ensure this filename matches what is in deps/npcap/installer/.
+Source: "..\deps\npcap\installer\npcap-1.87.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Icons]
-; Start menu entry (no desktop icon by default).
 Name: "{group}\{#MyAppName} Command Prompt Help"; Filename: "{sys}\cmd.exe"; \
     Parameters: "/k ""{app}\{#MyAppExeName}"" --list"; WorkingDir: "{app}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
@@ -75,6 +75,17 @@ Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environmen
     Flags: preservestringtype uninsdeletekeyifempty
 
 [Code]
+// Broadcast helper: notify other processes that environment changed
+function SendMessageTimeout(hWnd: LongWord; Msg: LongWord; wParam: LongWord; lParam: string; fuFlags: LongWord; uTimeout: LongWord; var lpdwResult: LongWord): LongWord;
+  external 'SendMessageTimeoutW@user32.dll stdcall';
+
+procedure RefreshEnvironmentVariables();
+var
+  Dummy: LongWord;
+begin
+  SendMessageTimeout($FFFF, $001A, 0, 'Environment', $0002, 5000, Dummy);
+end;
+
 // ─── Helper: check if a path segment is already in PATH ────────────────────
 function NeedsAddPath(Param: string): boolean;
 var
@@ -99,7 +110,7 @@ begin
   NpcapKey := 'SOFTWARE\WOW6432Node\Npcap';
   if not RegKeyExists(HKEY_LOCAL_MACHINE, NpcapKey) then begin
     Log('npcap not found — installing silently');
-    Exec(ExpandConstant('{tmp}\npcap-1.75.exe'), '/S', '', SW_HIDE,
+    Exec(ExpandConstant('{tmp}\npcap-1.87.exe'), '/S', '', SW_HIDE,
          ewWaitUntilTerminated, ResultCode);
     if ResultCode <> 0 then
       MsgBox('npcap installation returned code ' + IntToStr(ResultCode) +
@@ -112,7 +123,7 @@ end;
 
 // ─── Install TAP-Windows6 driver if not already present ────────────────────
 // devcon.exe, OemVista.inf, tap0901.cat and tap0901.sys
-// are all deployed to {app}\amd64\. 
+// are all deployed to {app}\amd64\.
 // Command: devcon.exe install OemVista.inf tap0901
 procedure InstallTapDriverIfNeeded();
 var
@@ -178,6 +189,8 @@ begin
   if CurStep = ssPostInstall then begin
     InstallNpcapIfNeeded();
     InstallTapDriverIfNeeded();
+    // Notify other processes that environment variables (PATH) may have changed
+    RefreshEnvironmentVariables();
   end;
 end;
 
@@ -201,5 +214,7 @@ begin
       Exec(ExpandConstant('{app}\amd64\devcon.exe'), 'remove tap0901', '',
            SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end;
+    // Notify other processes that environment variables (PATH) may have changed
+    RefreshEnvironmentVariables();
   end;
 end;
