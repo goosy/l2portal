@@ -7,6 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use pcap::Device;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use unicode_width::UnicodeWidthStr;
 
 /// Metadata for a single network interface.
 #[derive(Debug, Clone)]
@@ -60,35 +61,83 @@ pub fn list_interfaces() -> Result<Vec<IfaceInfo>> {
 }
 
 /// Print the interface list to stdout in a fixed-width table.
+///
+/// Column order: ifIdx | Name (28) | IP (15) | Description (truncated, last)
+/// Uses Unicode display width so CJK characters (width=2) align correctly.
 pub fn print_interface_list(ifaces: &[IfaceInfo]) {
+    const NAME_W: usize = 30;
+    const IP_W:   usize = 15;
+    const DESC_W: usize = 45;
+
     println!(
-        "  {:>6}  {:<20}  {:<40}  {}",
-        "ifIdx", "Name", "Description", "IP"
+        "  {:>6}  {}  {}  {}",
+        "ifIdx",
+        fit_str("Name", NAME_W),
+        fit_str("IP", IP_W),
+        "Description",
     );
     println!(
-        "  {:->6}  {:-<20}  {:-<40}  {:-<15}",
-        "", "", "", ""
+        "  {:->6}  {}  {}  {}",
+        "",
+        "-".repeat(NAME_W),
+        "-".repeat(IP_W),
+        "-".repeat(DESC_W),
     );
     for iface in ifaces {
         let ip_str = iface
             .ip
             .map(|ip| ip.to_string())
             .unwrap_or_else(|| "-".to_string());
-        let name = if iface.friendly_name.is_empty() {
+
+        let name_src = if iface.friendly_name.is_empty() {
             &iface.description
         } else {
             &iface.friendly_name
         };
-        let desc = if iface.description.len() > 40 {
-            format!("{}…", &iface.description[..39])
-        } else {
-            iface.description.clone()
-        };
+
         println!(
-            "  {:>6}  {:<20}  {:<40}  {}",
-            iface.if_index, name, desc, ip_str
+            "  {:>6}  {}  {}  {}",
+            iface.if_index,
+            fit_str(name_src, NAME_W),
+            fit_str(&ip_str, IP_W),
+            truncate_str(&iface.description, DESC_W),
         );
     }
+}
+
+/// Pad or truncate `s` to exactly `col_width` display columns.
+/// CJK and other wide characters count as 2 columns each.
+/// Truncation appends '…' and pads the remainder with spaces.
+fn fit_str(s: &str, col_width: usize) -> String {
+    let display_w = s.width();
+    if display_w <= col_width {
+        // Pad with spaces to reach col_width.
+        format!("{}{}", s, " ".repeat(col_width - display_w))
+    } else {
+        truncate_str(s, col_width)
+    }
+}
+
+/// Truncate `s` so its display width is at most `col_width`, appending '…'.
+/// The result is NOT padded — use `fit_str` when padding is needed.
+fn truncate_str(s: &str, col_width: usize) -> String {
+    if s.width() <= col_width {
+        return s.to_string();
+    }
+    // Reserve 1 display column for '…' (itself width=1).
+    let budget = col_width.saturating_sub(1);
+    let mut result = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cw > budget {
+            break;
+        }
+        result.push(ch);
+        used += cw;
+    }
+    result.push('…');
+    result
 }
 
 /// Resolve a user-supplied `--if` value to a pcap device name.
