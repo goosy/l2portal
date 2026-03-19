@@ -4,6 +4,25 @@ Lightweight Layer-2 UDP tunnel bridge for Windows.
 Transparently bridges two Ethernet segments over a UDP tunnel — no encryption,
 no handshake, bare Ethernet frames as UDP payload (wire-compatible with l2tunnel).
 
+## Platform considerations
+
+L2Portal is currently focused on Windows.
+
+On Linux, similar functionality can already be achieved using native kernel
+features such as VXLAN, bridge, and TAP/TUN devices, which provide a
+well-integrated and high-performance solution for Layer-2 tunneling and LAN extension.
+
+In contrast, Windows lacks a comparable set of composable Layer-2 primitives.
+L2Portal is designed to fill this gap by providing a zero-configuration,
+integrated solution built on top of npcap and TAP-Windows.
+
+As a result, L2Portal prioritizes deep integration with the Windows networking
+stack over cross-platform portability.
+
+Future versions may include a Linux-based server component to support
+heterogeneous deployments (e.g. Linux ↔ Windows), while keeping the client-side
+experience on Windows simple and transparent.
+
 ## Modes
 
 | Mode | Flag | Description |
@@ -11,6 +30,11 @@ no handshake, bare Ethernet frames as UDP payload (wire-compatible with l2tunnel
 | List interfaces | `--list` | Print all capturable interfaces and exit |
 | Server | `--if <IFID>` | Capture a physical NIC and forward frames over UDP |
 | Client | `--tap <NAME>[:<IP/prefix>]` | Create a TAP adapter, bridge to a UDP tunnel |
+
+In typical deployments:
+
+- L2Portal server mode replaces `l2tunnel + bridge`
+- L2Portal client mode enables use cases that require direct interaction with applications
 
 ## Quick Start
 
@@ -125,3 +149,41 @@ checks the optional removal boxes during uninstall.
 This tool performs **no authentication and no encryption**.  
 Do not expose the UDP port to untrusted networks.  
 For secure deployments, run inside a VPN tunnel (WireGuard, OpenVPN, etc.).
+
+## Comparison with l2tunnel
+
+L2Portal is wire-compatible with [l2tunnel](https://github.com/tun2proxy/l2tunnel),
+using the same bare Ethernet-over-UDP encapsulation format.
+
+While l2tunnel focuses on providing a minimal Layer-2 transport between endpoints,
+L2Portal extends this model by integrating the tunnel directly with the host
+networking environment.
+
+| Capability | l2tunnel | l2portal server | l2portal client |
+|---|---|---|---|
+| Inject frames into an **existing physical NIC** | ✗ — requires external bridging or forwarding logic | ✅ — frames are injected directly via npcap; no bridge required | — |
+| Expose L2 traffic to **local applications** | ✗ — no built-in integration with the host networking stack | — | ✅ — frames are delivered through a TAP adapter visible to the OS and applications |
+| Propagate frames onto the **local LAN** | ✗ — requires an external bridge (e.g. Linux bridge, Hyper-V switch) | ✅ — operates directly on the physical NIC in promiscuous mode | ✗ — by design; traffic terminates on the local machine |
+
+### Design differences
+
+- l2tunnel
+  - Provides a minimal Layer-2 transport mechanism
+  - The virtual interface acts as a tunnel endpoint only
+  - Does not include built-in bridging or host stack integration
+  - Intended to be combined with external components for full networking integration
+
+- L2Portal (server mode)
+  - Eliminates the need for an external bridge
+  - Uses npcap to attach directly to an existing physical NIC
+  - Preserves the NIC’s original IP configuration and normal traffic
+
+- L2Portal (client mode)
+  - Terminates the tunnel on a TAP adapter
+  - Makes tunneled traffic available to the Windows TCP/IP stack
+  - Allows unmodified applications to interact with the remote Layer-2 network
+
+**In short:**
+
+- l2tunnel: provides a transport primitive; cross-platform (e.g. Linux, Windows)
+- L2Portal: provides an integrated solution; currently Windows-only
