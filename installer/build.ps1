@@ -2,7 +2,7 @@
 # Build l2portal.exe and compile the Inno Setup installer.
 #
 # Prerequisites:
-#   - Rust toolchain (stable, target x86_64-pc-windows-msvc)
+#   - Rust toolchain (stable-x86_64-pc-windows-gnu)
 #   - npcap SDK in deps/npcap/sdk/
 #   - Inno Setup 6 installed (iscc.exe in PATH or ISCC env var)
 #
@@ -37,7 +37,9 @@ if (Test-Path $NpcapSdk) {
 # ── Compile Rust ─────────────────────────────────────────────────────────────
 Push-Location $ProjectRoot
 try {
-    $cargoArgs = @("build", "--target", "x86_64-pc-windows-msvc")
+    # No --target specified; relies on rustup default (stable-x86_64-pc-windows-gnu).
+    # This keeps the output in target/release/ instead of target/<triple>/release/.
+    $cargoArgs = @("build")
     if ($Release) { $cargoArgs += "--release" }
     Write-Host "[build] Running: cargo $($cargoArgs -join ' ')"
     cargo @cargoArgs

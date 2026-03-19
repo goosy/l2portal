@@ -62,7 +62,7 @@ switch 203.0.113.20:4789
 
 ### Prerequisites
 
-- Rust stable toolchain, target `x86_64-pc-windows-msvc`
+- Rust toolchain `stable-x86_64-pc-windows-gnu`
 - npcap SDK extracted to `deps/npcap/sdk/`  
   Download: https://npcap.com/#download → "npcap-sdk-x.xx.zip"
 - (For installer only) Inno Setup 6: https://jrsoftware.org/isinfo.php
@@ -74,7 +74,7 @@ switch 203.0.113.20:4789
 $env:LIB     = "$PWD\deps\npcap\sdk\Lib\x64"
 $env:INCLUDE = "$PWD\deps\npcap\sdk\Include"
 
-cargo build --release --target x86_64-pc-windows-msvc
+cargo build --release --target x86_64-pc-windows-gnu
 ```
 
 Or use the provided script (also compiles the installer):
