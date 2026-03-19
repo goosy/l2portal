@@ -50,12 +50,12 @@ Source: "..\target\release\l2portal.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; TAP management tool (deployed alongside l2portal.exe).
 Source: "..\deps\tap\tapctl.exe"; DestDir: "{app}"; Flags: ignoreversion
 
-; TAP driver files and devcon.exe — all deployed together under {app}\amd64\.
+; TAP driver files and devcon.exe — all deployed together under {app}\TAP\.
 ; so that "devcon.exe install OemVista.inf tap0901" can find both the inf and sys files.
-Source: "..\deps\tap\amd64\devcon.exe";   DestDir: "{app}\amd64"; Flags: ignoreversion
-Source: "..\deps\tap\amd64\OemVista.inf"; DestDir: "{app}\amd64"; Flags: ignoreversion
-Source: "..\deps\tap\amd64\tap0901.cat";  DestDir: "{app}\amd64"; Flags: ignoreversion
-Source: "..\deps\tap\amd64\tap0901.sys";  DestDir: "{app}\amd64"; Flags: ignoreversion
+Source: "..\deps\tap\amd64\devcon.exe";   DestDir: "{app}\TAP"; Flags: ignoreversion
+Source: "..\deps\tap\amd64\OemVista.inf"; DestDir: "{app}\TAP"; Flags: ignoreversion
+Source: "..\deps\tap\amd64\tap0901.cat";  DestDir: "{app}\TAP"; Flags: ignoreversion
+Source: "..\deps\tap\amd64\tap0901.sys";  DestDir: "{app}\TAP"; Flags: ignoreversion
 
 ; npcap installer — filename is kept current by build.ps1 automatically.
 ; When running iscc manually, ensure this filename matches what is in deps/npcap/installer/.
@@ -123,7 +123,7 @@ end;
 
 // ─── Install TAP-Windows6 driver if not already present ────────────────────
 // devcon.exe, OemVista.inf, tap0901.cat and tap0901.sys
-// are all deployed to {app}\amd64\.
+// are all deployed to {app}\TAP\.
 // Command: devcon.exe install OemVista.inf tap0901
 procedure InstallTapDriverIfNeeded();
 var
@@ -134,8 +134,8 @@ begin
   SysDriverPath := ExpandConstant('{sys}\drivers\tap0901.sys');
   if not FileExists(SysDriverPath) then begin
     Log('TAP driver not found — installing via devcon');
-    DevconPath := ExpandConstant('{app}\amd64\devcon.exe');
-    WorkDir    := ExpandConstant('{app}\amd64');
+    DevconPath := ExpandConstant('{app}\TAP\devcon.exe');
+    WorkDir    := ExpandConstant('{app}\TAP');
     Exec(DevconPath, 'install OemVista.inf tap0901',
          WorkDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
     if (ResultCode <> 0) and (ResultCode <> 1) then begin
@@ -211,7 +211,7 @@ begin
 
     // Remove TAP driver if checked.
     if Assigned(UninstTapCheck) and UninstTapCheck.Checked then begin
-      Exec(ExpandConstant('{app}\amd64\devcon.exe'), 'remove tap0901', '',
+      Exec(ExpandConstant('{app}\TAP\devcon.exe'), 'remove tap0901', '',
            SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end;
     // Notify other processes that environment variables (PATH) may have changed
