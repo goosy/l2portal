@@ -9,8 +9,11 @@
 //
 // Because pcap::Capture uses a blocking C API, capture and injection each run
 // in their own OS thread, communicating with the async runtime via mpsc channels.
+//
+// An optional BPF filter can be passed in via `capture_filter` to suppress
+// unwanted frames before they reach the forwarding path.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -23,10 +26,18 @@ const UDP_BUF: usize = 1600;
 
 /// Run the server mode event loop.
 ///
-/// `pcap_device` — npcap device path resolved by `iface::resolve_iface`.
-/// `local_addr`  — UDP socket bind address (already resolved from routing if 0.0.0.0).
-/// `remote_addr` — fixed remote peer address.
-pub async fn run(pcap_device: String, local_addr: SocketAddr, remote_addr: SocketAddr) -> Result<()> {
+/// `pcap_device`    — npcap device path resolved by `iface::resolve_iface`.
+/// `local_addr`     — UDP socket bind address (already resolved from routing if 0.0.0.0).
+/// `remote_addr`    — fixed remote peer address.
+/// `capture_filter` — optional BPF filter expression to install on the capture handle.
+///                    `Some(expr)` suppresses matching frames before forwarding;
+///                    `None` forwards everything captured.
+pub async fn run(
+    pcap_device: String,
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    capture_filter: Option<String>,
+) -> Result<()> {
     log::info!(
         "starting — iface={} local={} remote={}",
         pcap_device,
@@ -37,7 +48,7 @@ pub async fn run(pcap_device: String, local_addr: SocketAddr, remote_addr: Socke
     // Open the NIC for capture (promiscuous) and for injection as separate handles.
     // pcap::Capture<Active> is not Clone, so we open two independent handles to
     // the same device: one for reading frames, one for sending injected frames.
-    let cap_handle = pcap::Capture::from_device(pcap_device.as_str())
+    let mut cap_handle = pcap::Capture::from_device(pcap_device.as_str())
         .with_context(|| format!("device '{}' not found", pcap_device))?
         .promisc(true)
         .snaplen(FRAME_BUF as i32)
@@ -45,6 +56,25 @@ pub async fn run(pcap_device: String, local_addr: SocketAddr, remote_addr: Socke
         .timeout(100)
         .open()
         .context("failed to open pcap capture handle")?;
+
+    // Install BPF filter if provided.  A filter is supplied when overlay and
+    // underlay share the same NIC; omitting it in that case would cause a loop.
+    match &capture_filter {
+        Some(expr) => {
+            log::info!("installing capture BPF filter: {}", expr);
+            cap_handle
+                .filter(expr, true)
+                .context("failed to install BPF filter on capture handle")
+                .map_err(|e| anyhow!(
+                    "{e}\n[FATAL] Cannot install BPF filter on shared NIC. \
+                     Running without the filter would create a forwarding loop. \
+                     Use separate NICs for overlay and underlay, or fix the filter error above."
+                ))?;
+        }
+        None => {
+            log::info!("no capture BPF filter — overlay and underlay NICs are distinct");
+        }
+    }
 
     let inj_handle = pcap::Capture::from_device(pcap_device.as_str())
         .with_context(|| format!("device '{}' not found (inject)", pcap_device))?

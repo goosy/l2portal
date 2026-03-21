@@ -140,6 +140,16 @@ fn truncate_str(s: &str, col_width: usize) -> String {
     result
 }
 
+/// Look up an `IfaceInfo` by its exact pcap device name.
+///
+/// Used by server mode to cross-reference the resolved pcap device back to
+/// interface metadata (e.g. IP address) for underlay-overlap detection.
+pub fn find_iface_by_pcap_name<'a>(pcap_name: &str, ifaces: &'a [IfaceInfo]) -> Option<&'a IfaceInfo> {
+    ifaces
+        .iter()
+        .find(|i| i.pcap_name.eq_ignore_ascii_case(pcap_name))
+}
+
 /// Resolve a user-supplied `--if` value to a pcap device name.
 ///
 /// Accepted forms (tried in order):

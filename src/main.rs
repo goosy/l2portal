@@ -7,6 +7,29 @@
 //
 // All error messages are written to stderr in the format:
 //   [ERROR] <module>: <message>
+//
+// Capture BPF filter — server mode:
+//   server::run accepts an `Option<String>` capture filter that is built here
+//   and passed in, keeping filter policy out of the server loop.  Currently
+//   the only implemented use is same-NIC loop prevention (described below);
+//   other filtering needs can be added here without touching server::run.
+//
+//   Same-NIC loop prevention:
+//   When the overlay NIC (--if) and the underlay NIC (UDP egress to --remote)
+//   are the same physical adapter, the tunnel's own UDP packets would be
+//   re-captured and re-forwarded, creating an infinite loop.
+//
+//   Detection uses Windows interface indices (if_index), which is reliable
+//   even when an adapter carries multiple IP addresses.
+//
+//   When same-NIC is confirmed, a narrow BPF filter is built and passed to
+//   server::run.  The filter matches only the tunnel session's own packets,
+//   keyed on the remote endpoint, so unrelated traffic from other hosts on
+//   the same port is not affected:
+//
+//     not (udp and ((src host R and src port RP) or (dst host R and dst port RP)))
+//
+//   When the two NICs are distinct, `capture_filter` is None.
 
 mod cli;
 mod client;
@@ -126,13 +149,62 @@ async fn run() -> Result<()> {
                 .context("[ERROR] main: interface enumeration failed")?;
             let pcap_device = iface::resolve_iface(iface_input, &ifaces)
                 .context("[ERROR] main: cannot resolve --if argument")?;
+
+            // Build capture_filter for same-NIC loop prevention.
+            // See the file-level comment for rationale, detection method, and
+            // filter expression design.
+            //
+            // Note: get_best_route is called a second time here — resolve_local_ip
+            // already called it internally, but threading the if_index through
+            // that return type is not worth the added complexity.
+            let capture_filter: Option<String> = (|| {
+                let underlay_if_index = routing::get_best_route(remote_ip)
+                    .map(|r| r.if_index)
+                    .unwrap_or_else(|e| {
+                        log::warn!(
+                            "could not resolve underlay if_index: {e} — \
+                             same-NIC BPF check skipped"
+                        );
+                        0
+                    });
+                let cap_if_index = iface::find_iface_by_pcap_name(&pcap_device, &ifaces)
+                    .map(|i| i.if_index)
+                    .unwrap_or_else(|| {
+                        log::warn!(
+                            "could not resolve if_index for capture device '{}' — \
+                             same-NIC BPF check skipped",
+                            pcap_device
+                        );
+                        0
+                    });
+
+                if underlay_if_index == 0 || cap_if_index == 0 {
+                    return None;
+                }
+                if cap_if_index != underlay_if_index {
+                    return None;
+                }
+
+                // Same NIC confirmed.  remote_ip is already Ipv4Addr (validated
+                // above), so no further matching is needed.
+                let rp = remote_addr.port();
+                Some(format!(
+                    "not (udp and \
+                     ((src host {rip} and src port {rp}) or \
+                      (dst host {rip} and dst port {rp})))",
+                    rip = remote_ip,
+                    rp  = rp,
+                ))
+            })();
+
             log::info!(
-                "server mode — pcap={} local={} remote={}",
+                "server mode — pcap={} local={} remote={} bpf={}",
                 pcap_device,
                 local_addr,
-                remote_addr
+                remote_addr,
+                capture_filter.as_deref().unwrap_or("none"),
             );
-            server::run(pcap_device, local_addr, remote_addr).await?;
+            server::run(pcap_device, local_addr, remote_addr, capture_filter).await?;
         }
 
         // Client mode: --tap
