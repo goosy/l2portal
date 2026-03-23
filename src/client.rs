@@ -6,7 +6,7 @@
 // Cleanup order on exit:
 //   tap_clear_ip → route_delete_host → tap_delete → state_remove
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -52,27 +52,10 @@ pub async fn run(params: ClientParams) -> Result<()> {
     state::state_write(&tap_name, None)?;
 
     // ── Optionally inject host route and configure TAP IP ──────────────────
-    let remote_ip = match remote_addr.ip() {
-        std::net::IpAddr::V4(ip) => ip,
-        _ => {
-            return Err(anyhow::anyhow!(
-                "[ERROR] client: --remote must be an IPv4 address"
-            ))
-        }
-    };
+    let remote_ip = remote_ipv4(remote_addr)?;
 
     if let Some((tap_ip, prefix)) = tap_ip_prefix {
-        // Query routing table for the best outbound path to the remote server.
-        let best = routing::get_best_route(remote_ip)
-            .context("[ERROR] client: cannot determine outbound route")?;
-
-        // Step 1: pin underlay route BEFORE configuring TAP IP.
-        routing::route_add_host(remote_ip, best.gateway, best.if_index)
-            .context("[ERROR] client: route_add_host failed")?;
-
-        // Update state file to include the route destination.
-        state::state_write(&tap_name, Some(remote_ip))?;
-
+        sync_tap_route(&tap_name, None, remote_ip)?;
         // Step 2: configure TAP IP (after underlay route is pinned).
         tap::tap_set_ip(&tap_name, tap_ip, prefix)
             .context("[ERROR] client: tap_set_ip failed")?;
@@ -206,6 +189,8 @@ pub async fn run(params: ClientParams) -> Result<()> {
 
     // ── Task 3: stdin — runtime peer switching ─────────────────────────────
     let remote_for_stdin = remote_shared.clone();
+    let tap_name_for_stdin = tap_name.clone();
+    let has_route_for_stdin = tap_ip_prefix.is_some();
     let task_stdin = tokio::spawn(async move {
         let stdin = tokio::io::stdin();
         let mut lines = BufReader::new(stdin).lines();
@@ -214,6 +199,30 @@ pub async fn run(params: ClientParams) -> Result<()> {
             if let Some(addr_str) = line.strip_prefix("switch ") {
                 match addr_str.trim().parse::<SocketAddr>() {
                     Ok(new_addr) => {
+                        let old_addr = *remote_for_stdin.read().await;
+                        if has_route_for_stdin {
+                            let old_ip = match remote_ipv4(old_addr) {
+                                Ok(ip) => ip,
+                                Err(e) => {
+                                    log::warn!("{e}");
+                                    eprintln!("{e}");
+                                    continue;
+                                }
+                            };
+                            let new_ip = match remote_ipv4(new_addr) {
+                                Ok(ip) => ip,
+                                Err(e) => {
+                                    log::warn!("{e}");
+                                    eprintln!("{e}");
+                                    continue;
+                                }
+                            };
+                            if let Err(e) = sync_tap_route(&tap_name_for_stdin, Some(old_ip), new_ip) {
+                                log::warn!("switch route update failed: {e}");
+                                eprintln!("[WARN] client: switch route update failed: {e}");
+                                continue;
+                            }
+                        }
                         *remote_for_stdin.write().await = new_addr;
                         log::info!("switched remote to {}", new_addr);
                         eprintln!("[INFO] client: switched remote to {new_addr}");
@@ -233,11 +242,12 @@ pub async fn run(params: ClientParams) -> Result<()> {
     // ── Register Ctrl+C cleanup ─────────────────────────────────────────────
     let tap_name_ctrlc = tap_name.clone();
     let has_route = tap_ip_prefix.is_some();
-    let ctrlc_remote_ip = remote_ip;
+    let remote_for_ctrlc = remote_shared.clone();
     let ctrlc_handler = tokio::spawn(async move {
         if let Ok(()) = tokio::signal::ctrl_c().await {
             eprintln!("[INFO] client: Ctrl+C received — cleaning up");
-            cleanup(tap_name_ctrlc.as_str(), has_route, ctrlc_remote_ip);
+            let remote_ip = current_remote_ip(&remote_for_ctrlc);
+            cleanup(tap_name_ctrlc.as_str(), has_route, remote_ip);
             std::process::exit(0);
         }
     });
@@ -251,7 +261,39 @@ pub async fn run(params: ClientParams) -> Result<()> {
     }
 
     // ── Normal exit cleanup ─────────────────────────────────────────────────
+    let remote_ip = current_remote_ip(&remote_shared);
     cleanup(&tap_name, tap_ip_prefix.is_some(), remote_ip);
+    Ok(())
+}
+
+fn remote_ipv4(addr: SocketAddr) -> Result<Ipv4Addr> {
+    match addr.ip() {
+        std::net::IpAddr::V4(ip) => Ok(ip),
+        _ => Err(anyhow!("[ERROR] client: remote address must be IPv4")),
+    }
+}
+
+fn current_remote_ip(remote: &Arc<RwLock<SocketAddr>>) -> Ipv4Addr {
+    match remote.try_read() {
+        Ok(addr) => remote_ipv4(*addr).unwrap_or(Ipv4Addr::UNSPECIFIED),
+        Err(_) => Ipv4Addr::UNSPECIFIED,
+    }
+}
+
+fn sync_tap_route(tap_name: &str, old_remote: Option<Ipv4Addr>, new_remote: Ipv4Addr) -> Result<()> {
+    if old_remote == Some(new_remote) {
+        routing::route_delete_host(new_remote)
+            .context("[ERROR] client: route_delete_host failed")?;
+    }
+    let best = routing::get_best_route(new_remote)
+        .context("[ERROR] client: cannot determine outbound route")?;
+    routing::route_add_host(new_remote, best.gateway, best.if_index)
+        .context("[ERROR] client: route_add_host failed")?;
+    state::state_write(tap_name, Some(new_remote))?;
+    if let Some(old_remote) = old_remote.filter(|old_remote| *old_remote != new_remote) {
+        routing::route_delete_host(old_remote)
+            .context("[ERROR] client: route_delete_host failed")?;
+    }
     Ok(())
 }
 
