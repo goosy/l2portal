@@ -214,7 +214,7 @@ struct WinAdapterMeta {
 ///
 /// IP_ADAPTER_INFO fields used (windows-sys 0.59 names):
 ///   .Next           *mut IP_ADAPTER_INFO — linked list
-///   .ComboIndex     u32                  — this is the ifIndex
+///   .Index          u32                  — IPv4 ifIndex for the adapter
 ///   .AdapterName    [u8; MAX_ADAPTER_NAME_LENGTH+4]  — GUID string
 ///   .Description    [u8; MAX_ADAPTER_DESCRIPTION_LENGTH+4]
 ///   .IpAddressList.IpAddress.String  [u8; 16]
@@ -268,8 +268,8 @@ fn build_windows_adapter_map() -> Result<HashMap<String, WinAdapterMeta>> {
             .ok()
             .filter(|ip| !ip.is_unspecified());
 
-        // ComboIndex is the interface index exposed by GetAdaptersInfo.
-        let if_index = adapter.ComboIndex;
+        // Index is the adapter's IPv4 interface index.
+        let if_index = adapter.Index;
 
         let friendly_name =
             get_friendly_name(if_index).unwrap_or_else(|| description.clone());
