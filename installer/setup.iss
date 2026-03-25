@@ -15,7 +15,7 @@
 ;   devcon.exe dp_add {app}\TAP\OemVista.inf
 
 #define MyAppName      "L2Portal"
-#define MyAppVersion   "0.2.0"
+#define MyAppVersion   "0.2.1"
 #define MyAppPublisher "L2Portal Authors"
 #define MyAppExeName   "l2portal.exe"
 #define MyAppDir       "{autopf}\L2Portal"
