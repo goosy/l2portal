@@ -46,7 +46,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 /// TAP argument: name and optional IP/prefix.
 struct TapArg {
-    name: String,
+    name: Option<String>,
     ip_prefix: Option<(Ipv4Addr, u8)>,
 }
 
@@ -65,14 +65,22 @@ fn parse_tap_arg(s: &str) -> Result<TapArg> {
             return Err(anyhow!("[ERROR] main: prefix {} exceeds 32", prefix));
         }
         Ok(TapArg {
-            name: name.to_string(),
+            name: parse_tap_name(name),
             ip_prefix: Some((ip, prefix)),
         })
     } else {
         Ok(TapArg {
-            name: s.to_string(),
+            name: parse_tap_name(s),
             ip_prefix: None,
         })
+    }
+}
+
+fn parse_tap_name(s: &str) -> Option<String> {
+    if s.eq_ignore_ascii_case("auto") {
+        None
+    } else {
+        Some(s.to_string())
     }
 }
 
@@ -211,7 +219,7 @@ async fn run() -> Result<()> {
         (None, Some(tap_str)) => {
             let tap_arg = parse_tap_arg(tap_str)?;
             let params = client::ClientParams {
-                tap_name: tap_arg.name,
+                tap_name: tap_arg.name.unwrap_or_else(|| "auto".to_string()),
                 tap_ip_prefix: tap_arg.ip_prefix,
                 local_addr,
                 remote_addr,

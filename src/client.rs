@@ -45,17 +45,32 @@ pub async fn run(params: ClientParams) -> Result<()> {
     state::cleanup_residue();
 
     // ── Create TAP adapter ──────────────────────────────────────────────────
-    tap::tap_create(&tap_name)
-        .with_context(|| format!("[ERROR] client: tap_create '{}' failed", tap_name))?;
+    let tap_display_name = tap_name.clone();
+    let requested_tap_name = if tap_name.eq_ignore_ascii_case("auto") {
+        None
+    } else {
+        Some(tap_name.as_str())
+    };
+    let (tap_guid, tap_name) = tap::tap_create(requested_tap_name)
+        .with_context(|| format!("[ERROR] client: tap_create '{}' failed", tap_display_name))?;
+    if let Some(name) = requested_tap_name {
+        if tap_name != name {
+            log::warn!(
+                "tapctl created adapter name '{}' but requested name was '{}'",
+                tap_name,
+                name
+            );
+        }
+    }
 
-    // Write TAP name to state file immediately (route not yet recorded).
-    state::state_write(&tap_name, None)?;
+    // Write TAP GUID to state file immediately (route not yet recorded).
+    state::state_write(&tap_guid, None)?;
 
     // ── Optionally inject host route and configure TAP IP ──────────────────
     let remote_ip = remote_ipv4(remote_addr)?;
 
     if let Some((tap_ip, prefix)) = tap_ip_prefix {
-        sync_tap_route(&tap_name, None, remote_ip)?;
+        sync_tap_route(&tap_guid, None, remote_ip)?;
         // Step 2: configure TAP IP (after underlay route is pinned).
         tap::tap_set_ip(&tap_name, tap_ip, prefix)
             .context("[ERROR] client: tap_set_ip failed")?;
@@ -189,7 +204,7 @@ pub async fn run(params: ClientParams) -> Result<()> {
 
     // ── Task 3: stdin — runtime peer switching ─────────────────────────────
     let remote_for_stdin = remote_shared.clone();
-    let tap_name_for_stdin = tap_name.clone();
+    let tap_guid_for_stdin = tap_guid.clone();
     let has_route_for_stdin = tap_ip_prefix.is_some();
     let task_stdin = tokio::spawn(async move {
         let stdin = tokio::io::stdin();
@@ -217,7 +232,7 @@ pub async fn run(params: ClientParams) -> Result<()> {
                                     continue;
                                 }
                             };
-                            if let Err(e) = sync_tap_route(&tap_name_for_stdin, Some(old_ip), new_ip) {
+                            if let Err(e) = sync_tap_route(&tap_guid_for_stdin, Some(old_ip), new_ip) {
                                 log::warn!("switch route update failed: {e}");
                                 eprintln!("[WARN] client: switch route update failed: {e}");
                                 continue;
@@ -241,13 +256,14 @@ pub async fn run(params: ClientParams) -> Result<()> {
 
     // ── Register Ctrl+C cleanup ─────────────────────────────────────────────
     let tap_name_ctrlc = tap_name.clone();
+    let tap_guid_ctrlc = tap_guid.clone();
     let has_route = tap_ip_prefix.is_some();
     let remote_for_ctrlc = remote_shared.clone();
     let ctrlc_handler = tokio::spawn(async move {
         if let Ok(()) = tokio::signal::ctrl_c().await {
             eprintln!("[INFO] client: Ctrl+C received — cleaning up");
             let remote_ip = current_remote_ip(&remote_for_ctrlc);
-            cleanup(tap_name_ctrlc.as_str(), has_route, remote_ip);
+            cleanup(tap_name_ctrlc.as_str(), tap_guid_ctrlc.as_str(), has_route, remote_ip);
             std::process::exit(0);
         }
     });
@@ -262,7 +278,7 @@ pub async fn run(params: ClientParams) -> Result<()> {
 
     // ── Normal exit cleanup ─────────────────────────────────────────────────
     let remote_ip = current_remote_ip(&remote_shared);
-    cleanup(&tap_name, tap_ip_prefix.is_some(), remote_ip);
+    cleanup(&tap_name, &tap_guid, tap_ip_prefix.is_some(), remote_ip);
     Ok(())
 }
 
@@ -280,7 +296,8 @@ fn current_remote_ip(remote: &Arc<RwLock<SocketAddr>>) -> Ipv4Addr {
     }
 }
 
-fn sync_tap_route(tap_name: &str, old_remote: Option<Ipv4Addr>, new_remote: Ipv4Addr) -> Result<()> {
+/// Keep the underlay host route aligned with the current remote peer and persist it in state.
+fn sync_tap_route(tap_guid: &str, old_remote: Option<Ipv4Addr>, new_remote: Ipv4Addr) -> Result<()> {
     if old_remote == Some(new_remote) {
         routing::route_delete_host(new_remote)
             .context("[ERROR] client: route_delete_host failed")?;
@@ -289,7 +306,7 @@ fn sync_tap_route(tap_name: &str, old_remote: Option<Ipv4Addr>, new_remote: Ipv4
         .context("[ERROR] client: cannot determine outbound route")?;
     routing::route_add_host(new_remote, best.gateway, best.if_index)
         .context("[ERROR] client: route_add_host failed")?;
-    state::state_write(tap_name, Some(new_remote))?;
+    state::state_write(tap_guid, Some(new_remote))?;
     if let Some(old_remote) = old_remote.filter(|old_remote| *old_remote != new_remote) {
         routing::route_delete_host(old_remote)
             .context("[ERROR] client: route_delete_host failed")?;
@@ -302,7 +319,7 @@ fn sync_tap_route(tap_name: &str, old_remote: Option<Ipv4Addr>, new_remote: Ipv4
 ///   2. Delete host route
 ///   3. Delete TAP adapter
 ///   4. Remove state file
-fn cleanup(tap_name: &str, has_route: bool, remote_ip: Ipv4Addr) {
+fn cleanup(tap_name: &str, tap_guid: &str, has_route: bool, remote_ip: Ipv4Addr) {
     if let Err(e) = tap::tap_clear_ip(tap_name) {
         log::warn!("tap_clear_ip failed: {e}");
     }
@@ -311,7 +328,7 @@ fn cleanup(tap_name: &str, has_route: bool, remote_ip: Ipv4Addr) {
             log::warn!("route_delete_host failed: {e}");
         }
     }
-    if let Err(e) = tap::tap_delete(tap_name) {
+    if let Err(e) = tap::tap_delete(tap_guid) {
         log::warn!("tap_delete failed: {e}");
     }
     state::state_remove();

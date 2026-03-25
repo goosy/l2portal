@@ -23,6 +23,15 @@ $ProjectRoot = Split-Path -Parent $ScriptDir
 
 Write-Host "[build] Project root: $ProjectRoot"
 
+$CargoToml = Join-Path $ProjectRoot "Cargo.toml"
+$CargoTomlContent = Get-Content $CargoToml -Raw
+$VersionMatch = [regex]::Match($CargoTomlContent, '(?m)^version\s*=\s*"([^"]+)"')
+if (-not $VersionMatch.Success) {
+    throw "[build] Failed to read package version from '$CargoToml'."
+}
+$AppVersion = $VersionMatch.Groups[1].Value
+Write-Host "[build] Cargo version: $AppVersion"
+
 # ── Set npcap SDK paths ──────────────────────────────────────────────────────
 $NpcapSdk = Join-Path $ProjectRoot "deps\npcap\sdk"
 if (Test-Path $NpcapSdk) {
@@ -61,13 +70,15 @@ if (-not $SkipInstaller) {
     }
     Write-Host "[build] npcap installer: $($NpcapExe.Name)"
 
-    # Update the npcap filename in setup.iss so it stays in sync and
-    # can also be compiled directly with iscc without this script.
+    # Update setup.iss so it stays in sync and can also be compiled
+    # directly with iscc without this script.
     $IssContent = Get-Content $IssFile -Raw
-    $IssUpdated = $IssContent -replace 'npcap-[\d.]+\.exe', $NpcapExe.Name
+    $IssUpdated = $IssContent `
+        -replace '(?m)(#define\s+MyAppVersion\s+")([^"]+)(")', "`${1}$AppVersion`${3}" `
+        -replace 'npcap-[\d.]+\.exe', $NpcapExe.Name
     if ($IssUpdated -ne $IssContent) {
         Set-Content $IssFile $IssUpdated -NoNewline
-        Write-Host "[build] setup.iss updated: npcap installer -> $($NpcapExe.Name)"
+        Write-Host "[build] setup.iss updated: version -> $AppVersion, npcap installer -> $($NpcapExe.Name)"
     }
 
     # Create output directory.

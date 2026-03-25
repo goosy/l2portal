@@ -11,7 +11,9 @@ Usage examples:
   l2portal.exe --list
   l2portal.exe --if "Ethernet" --local 0.0.0.0:4789 --remote 203.0.113.10:4789
   l2portal.exe --tap tap-ot --local 0.0.0.0:4789 --remote 203.0.113.1:4789
-  l2portal.exe --tap tap-ot:192.168.10.50/24 --local 0.0.0.0:4789 --remote 203.0.113.1:4789"#
+  l2portal.exe --tap tap-ot:192.168.10.50/24 --local 0.0.0.0:4789 --remote 203.0.113.1:4789
+  l2portal.exe --tap auto --local 0.0.0.0:4789 --remote 203.0.113.1:4789
+  l2portal.exe --tap auto:192.168.10.50/24 --local 0.0.0.0:4789 --remote 203.0.113.1:4789"#
 )]
 pub struct Args {
     /// List available capture interfaces and exit.
@@ -26,6 +28,7 @@ pub struct Args {
     pub iface: Option<String>,
 
     /// Client mode: TAP adapter name, optionally with static IP/prefix.
+    /// Use "auto" to let tapctl auto-assign the adapter name.
     /// Format: <name> or <name>:<IP>/<prefix>  e.g. "tap-ot:192.168.10.50/24"
     #[arg(long, value_name = "NAME[:IP/PREFIX]")]
     pub tap: Option<String>,

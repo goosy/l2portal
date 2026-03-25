@@ -11,11 +11,11 @@
 ;   deps\tap\amd64\tap0901.sys
 ;   deps\npcap\installer\npcap-x.xx.exe   (filename kept current by build.ps1)
 ;
-; TAP driver install command (devcon and inf are in the same directory):
-;   devcon.exe install OemVista.inf tap0901
+; TAP driver package import command:
+;   devcon.exe dp_add {app}\TAP\OemVista.inf
 
 #define MyAppName      "L2Portal"
-#define MyAppVersion   "0.1.0"
+#define MyAppVersion   "0.2.0"
 #define MyAppPublisher "L2Portal Authors"
 #define MyAppExeName   "l2portal.exe"
 #define MyAppDir       "{autopf}\L2Portal"
@@ -51,7 +51,8 @@ Source: "..\target\release\l2portal.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\deps\tap\tapctl.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; TAP driver files and devcon.exe — all deployed together under {app}\TAP\.
-; so that "devcon.exe install OemVista.inf tap0901" can find both the inf and sys files.
+; The installer imports the driver package into the driver store with
+; "devcon.exe dp_add {app}\TAP\OemVista.inf" without creating an adapter instance.
 Source: "..\deps\tap\amd64\devcon.exe";   DestDir: "{app}\TAP"; Flags: ignoreversion
 Source: "..\deps\tap\amd64\OemVista.inf"; DestDir: "{app}\TAP"; Flags: ignoreversion
 Source: "..\deps\tap\amd64\tap0901.cat";  DestDir: "{app}\TAP"; Flags: ignoreversion
@@ -124,20 +125,20 @@ end;
 // ─── Install TAP-Windows6 driver if not already present ────────────────────
 // devcon.exe, OemVista.inf, tap0901.cat and tap0901.sys
 // are all deployed to {app}\TAP\.
-// Command: devcon.exe install OemVista.inf tap0901
+// Command: devcon.exe dp_add {app}\TAP\OemVista.inf
 procedure InstallTapDriverIfNeeded();
 var
   SysDriverPath: string;
   ResultCode: integer;
-  DevconPath, WorkDir: string;
+  DevconPath, InfPath: string;
 begin
   SysDriverPath := ExpandConstant('{sys}\drivers\tap0901.sys');
   if not FileExists(SysDriverPath) then begin
     Log('TAP driver not found — installing via devcon');
     DevconPath := ExpandConstant('{app}\TAP\devcon.exe');
-    WorkDir    := ExpandConstant('{app}\TAP');
-    Exec(DevconPath, 'install OemVista.inf tap0901',
-         WorkDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    InfPath    := ExpandConstant('{app}\TAP\OemVista.inf');
+    Exec(DevconPath, 'dp_add "' + InfPath + '"',
+         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     if (ResultCode <> 0) and (ResultCode <> 1) then begin
       // devcon exits 1 when a reboot is required — that is acceptable.
       MsgBox('TAP driver installation returned code ' + IntToStr(ResultCode) +
@@ -146,6 +147,48 @@ begin
     end;
   end else begin
     Log('TAP driver already installed — skipping');
+  end;
+end;
+
+procedure RemoveTapDriverPackages();
+var
+  TempFile, PublishedName, Line: string;
+  Lines: TArrayOfString;
+  I, ResultCode: integer;
+begin
+  TempFile := ExpandConstant('{tmp}\tap-driver-packages.txt');
+  if FileExists(TempFile) then
+    DeleteFile(TempFile);
+
+  if not Exec(ExpandConstant('{cmd}'),
+    '/C pnputil /enum-drivers > "' + TempFile + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then begin
+    Log('Failed to execute pnputil /enum-drivers while uninstalling TAP');
+    exit;
+  end;
+  if ResultCode <> 0 then begin
+    Log('pnputil /enum-drivers returned code ' + IntToStr(ResultCode));
+    exit;
+  end;
+  if not LoadStringsFromFile(TempFile, Lines) then begin
+    Log('Failed to load TAP driver package list from ' + TempFile);
+    exit;
+  end;
+
+  PublishedName := '';
+  for I := 0 to GetArrayLength(Lines) - 1 do begin
+    Line := Trim(Lines[I]);
+    if Pos('Published Name:', Line) = 1 then begin
+      PublishedName := Trim(Copy(Line, Length('Published Name:') + 1, MaxInt));
+    end else if (Pos('Original Name:', Line) = 1) and
+               (Lowercase(Trim(Copy(Line, Length('Original Name:') + 1, MaxInt))) = 'oemvista.inf') and
+               (PublishedName <> '') then begin
+      Log('Removing TAP driver package ' + PublishedName);
+      Exec(ExpandConstant('{cmd}'),
+        '/C pnputil /delete-driver ' + PublishedName + ' /uninstall /force',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      PublishedName := '';
+    end;
   end;
 end;
 
@@ -211,8 +254,7 @@ begin
 
     // Remove TAP driver if checked.
     if Assigned(UninstTapCheck) and UninstTapCheck.Checked then begin
-      Exec(ExpandConstant('{app}\TAP\devcon.exe'), 'remove tap0901', '',
-           SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      RemoveTapDriverPackages();
     end;
     // Notify other processes that environment variables (PATH) may have changed
     RefreshEnvironmentVariables();
