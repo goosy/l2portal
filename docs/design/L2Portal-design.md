@@ -279,6 +279,7 @@ switch 203.0.113.20:4789
  │     └─📄tapctl.exe               # 从 OpenVPN 安装包提取，部署到目标机
  └─📂installer/
     ├─📄setup.iss                   # Inno Setup 脚本
+    ├─📄l2p.cmd                     # l2portal.exe 短别名（打包进安装包）
     └─📄build.ps1                   # 构建脚本
 ```
 
@@ -392,6 +393,7 @@ graph TB
 - `deps/tap/amd64/`（`OemVista.inf`、`tap0901.cat`、`tap0901.sys`、`devcon.exe`）：TAP 驱动文件，安装与卸载阶段调用 `devcon.exe`
 - `deps/tap/tapctl.exe`：TAP 实例管理工具，与 `l2portal.exe` 一同部署到安装目录
 - `target/release/l2portal.exe`：程序本体
+- `installer/l2p.cmd`：`l2portal.exe` 的短别名，与主程序一同部署到安装目录，使用户可通过 `l2p` 调用
 
 #### 依赖检测与安装
 
@@ -409,10 +411,12 @@ graph TB
     → 未安装：静默运行 devcon.exe dp_add "{app}\TAP\OemVista.inf"（只导入驱动包，不创建实例）
     → 已安装：跳过
 
-3. 复制 l2portal.exe、tapctl.exe 以及 deps/tap/amd64/ 到安装目录
+3. 复制 l2portal.exe、l2p.cmd、tapctl.exe 以及 deps/tap/amd64/ 到安装目录
     → deps/tap/amd64/devcon.exe 将用于将来卸载
 
 4. 将安装目录加入系统 PATH，并广播 WM_SETTINGCHANGE 使其立即生效
+
+5. 安装完成后弹窗提示用户：安装目录已加入 PATH，可在新终端中使用 l2portal 或 l2p 命令
 ```
 
 #### 主体安装
@@ -427,7 +431,8 @@ graph TB
   │  ├─📄tap0901.sys
   │  └─📄devcon.exe            # 用于卸载驱动
   ├─📄tapctl.exe               # TAP 管理
-  └─📄l2portal.exe             # 主程序
+  ├─📄l2portal.exe             # 主程序
+  └─📄l2p.cmd                  # 短别名（调用 l2portal.exe %*）
 ```
 
 #### 卸载
@@ -445,6 +450,8 @@ graph TB
 [ ] 同时卸载 TAP-Windows Adapter
     （如其它软件（如 OpenVPN）也在使用，请勿勾选）
 ```
+
+卸载程序始终自动从系统 PATH 中移除安装目录（`C:\Program Files\L2Portal`），并广播 `WM_SETTINGCHANGE` 使其立即生效。PATH 清理通过代码从注册表值中精确删除对应路径片段，而非依赖 Inno Setup 的 `uninsdeletekeyifempty` flag（该 flag 仅在整个 key 为空时删除 key，不会修改 PATH 字符串内容）。
 
 TAP 驱动卸载实现说明：
 

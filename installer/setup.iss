@@ -4,6 +4,7 @@
 ;
 ; Expected layout at compile time (relative to this .iss file's parent = project root):
 ;   target\release\l2portal.exe
+;   installer\l2p.cmd             (short alias — generated here, not from Rust)
 ;   deps\tap\tapctl.exe
 ;   deps\tap\amd64\devcon.exe
 ;   deps\tap\amd64\OemVista.inf
@@ -15,7 +16,7 @@
 ;   devcon.exe dp_add {app}\TAP\OemVista.inf
 
 #define MyAppName      "L2Portal"
-#define MyAppVersion   "0.2.1"
+#define MyAppVersion   "0.2.2"
 #define MyAppPublisher "L2Portal Authors"
 #define MyAppExeName   "l2portal.exe"
 #define MyAppDir       "{autopf}\L2Portal"
@@ -26,8 +27,9 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={#MyAppDir}
+; No Start Menu group needed — l2portal is a CLI tool accessed via PATH.
 DefaultGroupName={#MyAppName}
-AllowNoIcons=yes
+DisableProgramGroupPage=yes
 PrivilegesRequired=admin
 OutputDir=..\dist
 OutputBaseFilename=L2Portal-{#MyAppVersion}-Setup
@@ -47,6 +49,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; Main executable.
 Source: "..\target\release\l2portal.exe"; DestDir: "{app}"; Flags: ignoreversion
 
+; l2p.cmd — short alias so users can type "l2p" at any prompt.
+Source: "..\installer\l2p.cmd"; DestDir: "{app}"; Flags: ignoreversion
+
 ; TAP management tool (deployed alongside l2portal.exe).
 Source: "..\deps\tap\tapctl.exe"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -62,18 +67,20 @@ Source: "..\deps\tap\amd64\tap0901.sys";  DestDir: "{app}\TAP"; Flags: ignorever
 ; When running iscc manually, ensure this filename matches what is in deps/npcap/installer/.
 Source: "..\deps\npcap\installer\npcap-1.87.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
-[Icons]
-Name: "{group}\{#MyAppName} Command Prompt Help"; Filename: "{sys}\cmd.exe"; \
-    Parameters: "/k ""{app}\{#MyAppExeName}"" --list"; WorkingDir: "{app}"
-Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
+; NOTE: No [Icons] section — l2portal is a CLI tool.
+; Users access it via the system PATH; no Start Menu shortcuts are created.
 
 [Registry]
 ; Add install dir to system PATH.
+; NOTE: Removal is handled entirely in code (RemoveFromPath) at uninstall time.
+; The "uninsdeletekeyifempty" flag only removes the whole key when empty and does
+; NOT strip our segment from the semicolon-delimited PATH value — so we do not
+; rely on it here.
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; \
     ValueType: expandsz; ValueName: "Path"; \
     ValueData: "{olddata};{app}"; \
     Check: NeedsAddPath(ExpandConstant('{app}')); \
-    Flags: preservestringtype uninsdeletekeyifempty
+    Flags: preservestringtype
 
 [Code]
 // Broadcast helper: notify other processes that environment changed
@@ -102,6 +109,57 @@ begin
   Result := Pos(';' + Uppercase(Param) + ';', ';' + Uppercase(OrigPath) + ';') = 0;
 end;
 
+// ─── Helper: remove a path segment from the system PATH ────────────────────
+// Works correctly regardless of whether the segment appears at the start,
+// middle, or end of the PATH string, and handles an optional trailing backslash.
+procedure RemoveFromPath(Param: string);
+var
+  OrigPath, NewPath, ParamUC, OrigUC: string;
+  P: integer;
+begin
+  if not RegQueryStringValue(HKEY_LOCAL_MACHINE,
+    'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+    'Path', OrigPath)
+  then
+    exit;
+
+  ParamUC := Uppercase(Param);
+  OrigUC  := Uppercase(OrigPath);
+
+  // Wrap with sentinel semicolons so every entry is surrounded by ';…;'.
+  OrigUC   := ';' + OrigUC + ';';
+  OrigPath := ';' + OrigPath + ';';
+
+  // Remove exact match (no trailing backslash).
+  repeat
+    P := Pos(';' + ParamUC + ';', OrigUC);
+    if P > 0 then begin
+      Delete(OrigPath, P, Length(';' + Param));
+      Delete(OrigUC,   P, Length(';' + ParamUC));
+    end;
+  until P = 0;
+
+  // Remove match with trailing backslash.
+  repeat
+    P := Pos(';' + ParamUC + '\;', OrigUC);
+    if P > 0 then begin
+      Delete(OrigPath, P, Length(';' + Param + '\'));
+      Delete(OrigUC,   P, Length(';' + ParamUC + '\'));
+    end;
+  until P = 0;
+
+  // Strip the sentinel semicolons we added.
+  if (Length(OrigPath) > 0) and (OrigPath[1] = ';') then
+    Delete(OrigPath, 1, 1);
+  if (Length(OrigPath) > 0) and (OrigPath[Length(OrigPath)] = ';') then
+    Delete(OrigPath, Length(OrigPath), 1);
+
+  NewPath := OrigPath;
+  RegWriteExpandStringValue(HKEY_LOCAL_MACHINE,
+    'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
+    'Path', NewPath);
+end;
+
 // ─── Install npcap if not already present ──────────────────────────────────
 procedure InstallNpcapIfNeeded();
 var
@@ -111,7 +169,7 @@ begin
   NpcapKey := 'SOFTWARE\WOW6432Node\Npcap';
   if not RegKeyExists(HKEY_LOCAL_MACHINE, NpcapKey) then begin
     Log('npcap not found — installing silently');
-    Exec(ExpandConstant('{tmp}\npcap-1.87.exe'), '/S', '', SW_HIDE,
+    Exec(ExpandConstant('{tmp}\npcap-1.87.exe'), '', '', SW_HIDE,
          ewWaitUntilTerminated, ResultCode);
     if ResultCode <> 0 then
       MsgBox('npcap installation returned code ' + IntToStr(ResultCode) +
@@ -200,7 +258,10 @@ var
 
 procedure InitializeWizard();
 begin
+  // IsUninstaller() returns True when this script runs as the uninstaller.
   if IsUninstaller() then begin
+    // Insert our page after wpWelcome (the "confirm uninstall" page).
+    // ShouldSkipPage() below ensures it is actually displayed.
     UninstPage := CreateCustomPage(
       wpWelcome,
       'Optional: Remove shared dependencies',
@@ -226,25 +287,47 @@ begin
   end;
 end;
 
-// ─── Post-install: run dependency installers ───────────────────────────────
+// Inno Setup's uninstaller skips custom wizard pages by default.
+// Returning False here forces our dependency-removal page to be displayed.
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  // Never skip our custom uninstall options page.
+  if IsUninstaller() and Assigned(UninstPage) and (PageID = UninstPage.ID) then
+    Result := False;
+end;
+
+// ─── Post-install: run dependency installers, then show PATH notice ─────────
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then begin
     InstallNpcapIfNeeded();
     InstallTapDriverIfNeeded();
-    // Notify other processes that environment variables (PATH) may have changed
+    // Notify other processes that environment variables (PATH) may have changed.
     RefreshEnvironmentVariables();
+  end;
+
+  if CurStep = ssDone then begin
+    // Tell the user the commands are now available on the PATH.
+    MsgBox(
+      'L2Portal has been added to the system PATH.'#13#10#13#10'You can run either of the following commands from any new terminal window:'#13#10#13#10'    l2portal --list'#13#10'    l2p --list'#13#10#13#10'Note: open a new Command Prompt or PowerShell window for the PATH change to take effect.',
+      mbInformation, MB_OK);
   end;
 end;
 
-// ─── Post-uninstall: optionally remove dependencies ────────────────────────
+// ─── Post-uninstall: strip PATH entry, then optionally remove dependencies ──
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   UninstStr: string;
   ResultCode: integer;
 begin
   if CurUninstallStep = usPostUninstall then begin
-    // Uninstall npcap if checked.
+    // Always remove our install directory from the system PATH.
+    RemoveFromPath(ExpandConstant('{app}'));
+    // Notify other processes that the PATH has changed.
+    RefreshEnvironmentVariables();
+
+    // Uninstall npcap if the user checked the box.
     if Assigned(UninstNpcapCheck) and UninstNpcapCheck.Checked then begin
       if RegQueryStringValue(HKEY_LOCAL_MACHINE,
           'SOFTWARE\WOW6432Node\Npcap', 'UninstallString', UninstStr) then begin
@@ -252,11 +335,9 @@ begin
       end;
     end;
 
-    // Remove TAP driver if checked.
+    // Remove TAP driver packages if the user checked the box.
     if Assigned(UninstTapCheck) and UninstTapCheck.Checked then begin
       RemoveTapDriverPackages();
     end;
-    // Notify other processes that environment variables (PATH) may have changed
-    RefreshEnvironmentVariables();
   end;
 end;
