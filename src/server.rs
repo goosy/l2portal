@@ -208,7 +208,7 @@ pub async fn run(
                     // occur transiently when the NIC driver is busy or when a frame's
                     // destination MAC is unknown on the local segment — both are expected
                     // during tunnel bring-up and normal cross-segment operation.
-                    log::error!("pcap inject: {e}");
+                    log::debug!("pcap inject: {e}");
                 }
             }
         })

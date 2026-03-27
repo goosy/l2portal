@@ -35,6 +35,7 @@ mod cli;
 mod client;
 mod iface;
 mod logger;
+mod pcap;
 mod routing;
 mod server;
 mod state;
@@ -110,6 +111,17 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let args = cli::Args::parse();
+
+    // ── pcap UTF-8 encoding init ──────────────────────────────────────────
+    // Call pcap_init(PCAP_CHAR_ENC_UTF_8) before any other pcap API so that
+    // all subsequent error strings from libpcap/npcap are guaranteed UTF-8.
+    // Without this, on non-English Windows the system ANSI code page is used
+    // (e.g. CP950 on zh-TW), causing the pcap crate's CStr→str conversion to
+    // fail with "invalid UTF-8 sequence".  See src/pcap_init.rs for details.
+    // Requires npcap ≥ 1.00 (project minimum; see design doc).
+    if let Err(e) = pcap::init_utf8_encoding() {
+        log::warn!("{e}");
+    }
 
     // ── --list ────────────────────────────────────────────────────────────
     if args.list {
