@@ -13,6 +13,12 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 
+/// Windows WSAECONNRESET: Winsock surfaces this error on recv_from / send_to
+/// when the remote host responded with ICMP Port Unreachable for a UDP packet
+/// we sent.  Signals "remote IP reachable, port not open yet" — non-fatal.
+#[cfg(target_os = "windows")]
+const WSAECONNRESET: i32 = 10054;
+
 use crate::routing;
 use crate::state;
 use crate::tap;
@@ -104,22 +110,52 @@ pub async fn run(params: ClientParams) -> Result<()> {
     // Shared remote address (updated atomically by the stdin task).
     let remote_shared: Arc<RwLock<SocketAddr>> = Arc::new(RwLock::new(remote_addr));
 
+    // Tracks the peer address that last produced a WSAECONNRESET, so duplicate
+    // warnings are suppressed until the peer changes or traffic resumes.
+    // Stored as Option<SocketAddr>: Some(addr) = that peer is unreachable,
+    // None = all clear.  Reset to None on peer switch or on successful I/O.
+    let unreachable_peer: Arc<RwLock<Option<SocketAddr>>> = Arc::new(RwLock::new(None));
+
     // ── Thread 1 & Task 1: UDP RX → TAP write ─────────────────────────────
     // UDP receive runs as a tokio task; TAP writes run in a blocking thread
     // (tap-windows Device::write is blocking/synchronous).
     let (udp_to_tap_tx, mut udp_to_tap_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
 
     let udp_rx = udp.clone();
+    let unreachable_peer_rx = unreachable_peer.clone();
+    let remote_for_rx = remote_shared.clone();
     let task_udp_rx = tokio::spawn(async move {
         let mut buf = vec![0u8; 1600];
         loop {
             match udp_rx.recv_from(&mut buf).await {
-                Ok((n, _src)) => {
+                Ok((n, src)) => {
+                    // Real frame received — peer is up; clear any unreachable warning.
+                    {
+                        let mut up = unreachable_peer_rx.write().await;
+                        if up.is_some() {
+                            log::info!("UDP rx from {}: peer is now reachable", src);
+                            *up = None;
+                        }
+                    }
                     if udp_to_tap_tx.send(buf[..n].to_vec()).await.is_err() {
                         break;
                     }
                 }
                 Err(e) => {
+                    #[cfg(target_os = "windows")]
+                    if e.raw_os_error() == Some(WSAECONNRESET) {
+                        let remote = *remote_for_rx.read().await;
+                        let mut up = unreachable_peer_rx.write().await;
+                        if *up != Some(remote) {
+                            log::warn!(
+                                "UDP recv_from: ICMP port-unreachable from {} — \
+                                 remote IP is reachable but peer port is not open yet",
+                                remote
+                            );
+                            *up = Some(remote);
+                        }
+                        continue; // non-fatal: keep listening
+                    }
                     log::error!("UDP recv_from failed: {e}");
                     break;
                 }
@@ -139,13 +175,13 @@ pub async fn run(params: ClientParams) -> Result<()> {
                 let mut dev = match tap_windows::Device::open(&tap_name_for_write) {
                     Ok(d) => d,
                     Err(e) => {
-                        eprintln!("[ERROR] client: failed to open TAP device for write: {e}");
+                        log::error!("client: failed to open TAP device for write: {e}");
                         return;
                     }
                 };
                 while let Some(frame) = udp_to_tap_rx.blocking_recv() {
                     if let Err(e) = dev.write_all(&frame) {
-                        eprintln!("[ERROR] client: TAP write failed: {e}");
+                        log::error!("client: TAP write failed: {e}");
                         break;
                     }
                 }
@@ -167,7 +203,7 @@ pub async fn run(params: ClientParams) -> Result<()> {
                 let mut dev = match tap_windows::Device::open(&tap_name_for_read) {
                     Ok(d) => d,
                     Err(e) => {
-                        eprintln!("[ERROR] client: failed to open TAP device for read: {e}");
+                        log::error!("client: failed to open TAP device for read: {e}");
                         return;
                     }
                 };
@@ -181,7 +217,7 @@ pub async fn run(params: ClientParams) -> Result<()> {
                             }
                         }
                         Err(e) => {
-                            eprintln!("[ERROR] client: TAP read failed: {e}");
+                            log::error!("client: TAP read failed: {e}");
                             break;
                         }
                     }
@@ -192,10 +228,24 @@ pub async fn run(params: ClientParams) -> Result<()> {
 
     let udp_tx = udp.clone();
     let remote_for_tx = remote_shared.clone();
+    let unreachable_peer_tx = unreachable_peer.clone();
     let task_udp_tx = tokio::spawn(async move {
         while let Some(frame) = tap_to_udp_rx.recv().await {
             let dest = *remote_for_tx.read().await;
             if let Err(e) = udp_tx.send_to(&frame, dest).await {
+                #[cfg(target_os = "windows")]
+                if e.raw_os_error() == Some(WSAECONNRESET) {
+                    let mut up = unreachable_peer_tx.write().await;
+                    if *up != Some(dest) {
+                        log::warn!(
+                            "UDP send_to {}: ICMP port-unreachable received — \
+                             remote IP is reachable but peer port is not open yet",
+                            dest
+                        );
+                        *up = Some(dest);
+                    }
+                    continue; // non-fatal: keep sending, peer may come up
+                }
                 log::error!("UDP send_to failed: {e}");
                 break;
             }
@@ -206,6 +256,7 @@ pub async fn run(params: ClientParams) -> Result<()> {
     // ── Task 3: stdin — runtime peer switching ─────────────────────────────
     let remote_for_stdin = remote_shared.clone();
     let tap_guid_for_stdin = tap_guid.clone();
+    let unreachable_peer_stdin = unreachable_peer.clone();
     let task_stdin = tokio::spawn(async move {
         let stdin = tokio::io::stdin();
         let mut lines = BufReader::new(stdin).lines();
@@ -219,7 +270,6 @@ pub async fn run(params: ClientParams) -> Result<()> {
                             Ok(ip) => ip,
                             Err(e) => {
                                 log::warn!("{e}");
-                                eprintln!("{e}");
                                 continue;
                             }
                         };
@@ -227,26 +277,25 @@ pub async fn run(params: ClientParams) -> Result<()> {
                             Ok(ip) => ip,
                             Err(e) => {
                                 log::warn!("{e}");
-                                eprintln!("{e}");
                                 continue;
                             }
                         };
                         if let Err(e) = sync_tap_route(&tap_guid_for_stdin, Some(old_ip), new_ip) {
                             log::warn!("switch route update failed: {e}");
-                            eprintln!("[WARN] client: switch route update failed: {e}");
                             continue;
                         }
                         *remote_for_stdin.write().await = new_addr;
+                        // New peer — reset the unreachable-warning state so the
+                        // first WSAECONNRESET from the new peer triggers a fresh warning.
+                        *unreachable_peer_stdin.write().await = None;
                         log::info!("switched remote to {}", new_addr);
-                        eprintln!("[INFO] client: switched remote to {new_addr}");
                     }
                     Err(e) => {
                         log::warn!("invalid address '{}': {e}", addr_str);
-                        eprintln!("[WARN] client: invalid address '{addr_str}': {e}");
                     }
                 }
             } else if !line.is_empty() {
-                eprintln!("[WARN] client: unknown command '{}' (hint: switch <IP:PORT>)", line);
+                log::warn!("unknown command '{}' (hint: switch <IP:PORT>)", line);
             }
         }
         log::info!("stdin closed");
@@ -258,7 +307,7 @@ pub async fn run(params: ClientParams) -> Result<()> {
     let remote_for_ctrlc = remote_shared.clone();
     let ctrlc_handler = tokio::spawn(async move {
         if let Ok(()) = tokio::signal::ctrl_c().await {
-            eprintln!("[INFO] client: Ctrl+C received — cleaning up");
+            log::info!("client: Ctrl+C received — cleaning up");
             let remote_ip = current_remote_ip(&remote_for_ctrlc);
             cleanup(tap_name_ctrlc.as_str(), tap_guid_ctrlc.as_str(), remote_ip);
             std::process::exit(0);

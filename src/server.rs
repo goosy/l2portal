@@ -15,8 +15,17 @@
 
 use anyhow::{anyhow, Context, Result};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
+
+/// Windows WSAECONNRESET: returned by Winsock when an outgoing UDP packet
+/// triggers an ICMP Port Unreachable reply from the remote host.  This means
+/// the remote IP is reachable but the target port is not yet open (peer not
+/// started / not ready).  It is non-fatal for a UDP tunnel; we continue and
+/// use it as a coarse "peer IP-reachable but port closed" signal.
+#[cfg(target_os = "windows")]
+const WSAECONNRESET: i32 = 10054;
 
 /// Ethernet frame buffer size: standard MTU 1500 + header 14 + FCS 4 = 1518.
 const FRAME_BUF: usize = 1518;
@@ -76,9 +85,16 @@ pub async fn run(
         }
     }
 
+    // The injection handle must be opened in promiscuous mode so that npcap
+    // uses the raw-send path (PacketSendPacket via NDIS raw injection) rather
+    // than the normal send path.  The normal path is subject to NDIS MAC
+    // filtering: strict drivers (e.g. Intel) silently drop frames whose
+    // destination MAC does not belong to the local NIC, including broadcasts.
+    // Promiscuous mode lifts that restriction and allows arbitrary frames —
+    // unicast, broadcast, and multicast — to be injected regardless of dst MAC.
     let inj_handle = pcap::Capture::from_device(pcap_device.as_str())
         .with_context(|| format!("device '{}' not found (inject)", pcap_device))?
-        .promisc(false)
+        .promisc(true)
         .snaplen(FRAME_BUF as i32)
         .timeout(100)
         .open()
@@ -109,7 +125,7 @@ pub async fn run(
                     }
                     Err(pcap::Error::TimeoutExpired) => continue,
                     Err(e) => {
-                        eprintln!("pcap capture: {e}");
+                        log::error!("pcap capture: {e}");
                         break;
                     }
                 }
@@ -118,10 +134,26 @@ pub async fn run(
         .context("failed to spawn capture thread")?;
 
     // ── Task A: mpsc channel → UDP TX ─────────────────────────────────────
+    // `peer_unreachable`: set on WSAECONNRESET (either send or recv side).
+    // Cleared only when Task B receives a real frame from the peer — that is
+    // the only reliable signal that the peer port is open.
+    let peer_unreachable = Arc::new(AtomicBool::new(false));
+    let peer_unreachable_tx = peer_unreachable.clone();
     let udp_tx = udp.clone();
     let task_tx = tokio::spawn(async move {
         while let Some(frame) = cap_rx.recv().await {
             if let Err(e) = udp_tx.send_to(&frame, remote_addr).await {
+                #[cfg(target_os = "windows")]
+                if e.raw_os_error() == Some(WSAECONNRESET) {
+                    if !peer_unreachable_tx.swap(true, Ordering::Relaxed) {
+                        log::warn!(
+                            "UDP send_to {}: ICMP port-unreachable received — \
+                             remote IP is reachable but peer port is not open yet",
+                            remote_addr
+                        );
+                    }
+                    continue; // non-fatal: keep sending, peer may come up
+                }
                 log::error!("UDP send_to {}: {e}", remote_addr);
                 break;
             }
@@ -130,6 +162,8 @@ pub async fn run(
     });
 
     // ── Thread B: mpsc channel → pcap inject ──────────────────────────────
+    // Injection errors are non-fatal and logged at DEBUG level only.
+    // See inline comment for details.
     let (inj_tx, mut inj_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
     std::thread::Builder::new()
         .name("pcap-inject".into())
@@ -137,8 +171,12 @@ pub async fn run(
             let mut inj = inj_handle;
             while let Some(frame) = inj_rx.blocking_recv() {
                 if let Err(e) = inj.sendpacket(frame) {
-                    eprintln!("pcap inject: {e}");
-                    // Injection errors are non-fatal; keep running.
+                    // Non-fatal: log at DEBUG level only.
+                    // Error 31 (device not functioning) and error 20 (device not found)
+                    // occur transiently when the NIC driver is busy or when a frame's
+                    // destination MAC is unknown on the local segment — both are expected
+                    // during tunnel bring-up and normal cross-segment operation.
+                    log::error!("pcap inject: {e}");
                 }
             }
         })
@@ -146,17 +184,35 @@ pub async fn run(
 
     // ── Task B: UDP RX → mpsc channel (→ inject thread) ───────────────────
     let udp_rx = udp.clone();
+    let peer_unreachable_rx = peer_unreachable.clone();
     let task_rx = tokio::spawn(async move {
         let mut buf = vec![0u8; UDP_BUF];
         loop {
             match udp_rx.recv_from(&mut buf).await {
                 Ok((n, src)) => {
+                    // Real frame received — peer port is open; clear warning flag.
+                    if peer_unreachable_rx.swap(false, Ordering::Relaxed) {
+                        log::info!("UDP rx from {}: peer is now reachable", src);
+                    }
                     log::debug!("UDP rx {} bytes from {}", n, src);
                     if inj_tx.send(buf[..n].to_vec()).await.is_err() {
                         break;
                     }
                 }
                 Err(e) => {
+                    // Windows WSAECONNRESET: remote returned ICMP Port Unreachable.
+                    // Non-fatal — peer port not open yet; suppress duplicate warnings.
+                    #[cfg(target_os = "windows")]
+                    if e.raw_os_error() == Some(WSAECONNRESET) {
+                        if !peer_unreachable_rx.swap(true, Ordering::Relaxed) {
+                            log::warn!(
+                                "UDP recv_from: ICMP port-unreachable from {} — \
+                                 remote IP is reachable but peer port is not open yet",
+                                remote_addr
+                            );
+                        }
+                        continue;
+                    }
                     log::error!("UDP recv_from: {e}");
                     break;
                 }
