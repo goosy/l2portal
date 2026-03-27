@@ -7,8 +7,13 @@ use clap::Parser;
     about = "Lightweight L2 UDP tunnel bridge",
     long_about = r#"Lightweight L2 UDP tunnel bridge.
 
+⚠️ STATUS: Work in Progress — not yet ready for production use.
+Server mode requires a NIC that supports raw frame injection (Realtek typically works;
+Intel does not). Use --probe to check your interface before deploying.
+
 Usage examples:
   l2portal.exe --list
+  l2portal.exe --probe
   l2portal.exe --if "Ethernet" --local 0.0.0.0:4789 --remote 203.0.113.10:4789
   l2portal.exe --tap tap-ot --local 0.0.0.0:4789 --remote 203.0.113.1:4789
   l2portal.exe --tap tap-ot:192.168.10.50/24 --local 0.0.0.0:4789 --remote 203.0.113.1:4789
@@ -17,8 +22,16 @@ Usage examples:
 )]
 pub struct Args {
     /// List available capture interfaces and exit.
-    #[arg(long, conflicts_with_all = ["iface", "tap", "local", "remote"])]
+    #[arg(long, conflicts_with_all = ["iface", "tap", "local", "remote", "probe"])]
     pub list: bool,
+
+    /// Probe each interface for raw injection support and exit.
+    /// Slower than --list: opens a temporary npcap handle per interface
+    /// and sends a harmless test frame to detect driver restrictions.
+    /// Interfaces that reject injection require TAP+Bridge mode (not yet
+    /// implemented) and are shown with "bridge" in the Inject column.
+    #[arg(long, conflicts_with_all = ["iface", "tap", "local", "remote", "list"])]
+    pub probe: bool,
 
     /// Server mode: physical interface to capture/inject.
     /// Accepts friendly name (e.g. "Ethernet"), ifIndex (e.g. "8"),

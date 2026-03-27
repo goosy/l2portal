@@ -13,10 +13,10 @@
 // An optional BPF filter can be passed in via `capture_filter` to suppress
 // unwanted frames before they reach the forwarding path.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::UdpSocket;
 
 /// Windows WSAECONNRESET: returned by Winsock when an outgoing UDP packet
@@ -54,6 +54,36 @@ pub async fn run(
         remote_addr
     );
 
+    // ── Inject capability probe ────────────────────────────────────────────
+    // Test whether the NIC driver accepts raw frame injection in promiscuous
+    // mode.  Some drivers (notably Intel) reject sendpacket regardless of the
+    // promisc flag.  This check must happen before we open the injection handle
+    // (or any other pcap handle) because the probe uses its own temporary handle.
+    let inject_supported = crate::iface::probe_inject(&pcap_device);
+    if inject_supported {
+        log::info!("inject probe: driver accepts raw injection — npcap inject path active");
+    } else {
+        log::error!("inject probe: driver rejects raw injection (Intel NDIS filtering?)");
+        log::error!(
+            "FATAL: This interface cannot be used in server mode because frames \
+             from the tunnel cannot be injected into the NIC."
+        );
+        log::error!(
+            "Workarounds: (1) Use a different NIC (Realtek typically works); \
+             (2) Use a USB Ethernet adapter that supports raw injection; \
+             (3) Use client mode with TAP and Windows network bridge (requires \
+             manual bridge setup)."
+        );
+        log::error!(
+            "Note: L2Portal is under active development. TAP+Bridge fallback \
+         for server mode is planned for a future release."
+        );
+        return Err(anyhow!(
+            "Interface '{}' does not support raw frame injection",
+            pcap_device
+        ));
+    }
+
     // Open the NIC for capture (promiscuous) and for injection as separate handles.
     // pcap::Capture<Active> is not Clone, so we open two independent handles to
     // the same device: one for reading frames, one for sending injected frames.
@@ -74,11 +104,13 @@ pub async fn run(
             cap_handle
                 .filter(expr, true)
                 .context("failed to install BPF filter on capture handle")
-                .map_err(|e| anyhow!(
-                    "{e}\n[FATAL] Cannot install BPF filter on shared NIC. \
+                .map_err(|e| {
+                    anyhow!(
+                        "{e}\n[FATAL] Cannot install BPF filter on shared NIC. \
                      Running without the filter would create a forwarding loop. \
                      Use separate NICs for overlay and underlay, or fix the filter error above."
-                ))?;
+                    )
+                })?;
         }
         None => {
             log::info!("no capture BPF filter — overlay and underlay NICs are distinct");

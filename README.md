@@ -1,5 +1,10 @@
 # L2Portal
 
+> ⚠️ **Status: Work in Progress**  
+> This project is under active development and not yet ready for production use.  
+> Server mode currently only works on NICs that support raw frame injection (Realtek is known to work; Intel typically does not).  
+> Use `--probe` to check your interface before deploying.
+
 Lightweight Layer-2 UDP tunnel bridge for Windows.  
 Transparently bridges two Ethernet segments over a UDP tunnel — no encryption,
 no handshake, bare Ethernet frames as UDP payload (wire-compatible with l2tunnel).
@@ -28,7 +33,9 @@ experience on Windows simple and transparent.
 | Mode | Flag | Description |
 |------|------|-------------|
 | List interfaces | `--list` | Print all capturable interfaces and exit |
-| Server | `--if <IFID>` | Capture a physical NIC and forward frames over UDP |
+| Probe injection | `--probe` | Test each interface for raw injection support |
+| Server | `--if <IFID>` | Capture a physical NIC and forward frames over UDP. |
+| ^^ | ^^ |**Requires a NIC that supports raw injection (use `--probe` to verify).** |
 | Client | `--tap <NAME>[:<IP/prefix>]` | Create a TAP adapter, bridge to a UDP tunnel |
 
 In typical deployments:
@@ -41,6 +48,9 @@ In typical deployments:
 ```powershell
 # List available interfaces
 l2portal.exe --list
+
+# Check which interfaces support raw injection
+l2portal.exe --probe
 
 # Server mode (physical NIC bridge)
 l2portal.exe --if "Ethernet" --local 0.0.0.0:4789 --remote 203.0.113.10:4789

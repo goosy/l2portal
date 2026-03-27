@@ -57,12 +57,13 @@ pub fn list_interfaces() -> Result<Vec<IfaceInfo>> {
             });
         }
     }
+
     Ok(result)
 }
 
 /// Print the interface list to stdout in a fixed-width table.
 ///
-/// Column order: ifIdx | Name (28) | IP (15) | Description (truncated, last)
+/// Column order: ifIdx | Name (30) | IP (15) | Description (truncated, last)
 /// Uses Unicode display width so CJK characters (width=2) align correctly.
 pub fn print_interface_list(ifaces: &[IfaceInfo]) {
     const NAME_W: usize = 30;
@@ -100,6 +101,69 @@ pub fn print_interface_list(ifaces: &[IfaceInfo]) {
             iface.if_index,
             fit_str(name_src, NAME_W),
             fit_str(&ip_str, IP_W),
+            truncate_str(&iface.description, DESC_W),
+        );
+    }
+}
+
+/// Print the interface list with injection probe results.
+///
+/// Same layout as `print_interface_list` plus an `Inject` column.
+/// Probes each interface by opening a temporary npcap handle and sending a
+/// harmless test frame — this is intentionally slow (may take several seconds)
+/// and is only invoked by `--probe`.
+///
+/// Inject column values:
+///   inject  — driver accepts raw npcap injection; server mode works fully.
+///   bridge  — driver rejects raw injection (e.g. Intel); server mode requires
+///              TAP+Bridge to forward frames into the local segment (not yet
+///              implemented — shown here as a heads-up).
+///   ?       — probe failed (device not accessible or npcap not loaded).
+pub fn print_probe_list(ifaces: &[IfaceInfo]) {
+    const NAME_W:   usize = 30;
+    const IP_W:     usize = 15;
+    const INJECT_W: usize = 6;
+    const DESC_W:   usize = 38;
+
+    println!(
+        "  {:>6}  {}  {}  {}  {}",
+        "ifIdx",
+        fit_str("Name", NAME_W),
+        fit_str("IP", IP_W),
+        fit_str("Inject", INJECT_W),
+        "Description",
+    );
+    println!(
+        "  {:->6}  {}  {}  {}  {}",
+        "",
+        "-".repeat(NAME_W),
+        "-".repeat(IP_W),
+        "-".repeat(INJECT_W),
+        "-".repeat(DESC_W),
+    );
+    for iface in ifaces {
+        let ip_str = iface
+            .ip
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "-".to_string());
+
+        let name_src = if iface.friendly_name.is_empty() {
+            &iface.description
+        } else {
+            &iface.friendly_name
+        };
+
+        let inject_str = match probe_inject(&iface.pcap_name) {
+            true  => "inject",
+            false => "bridge",
+        };
+
+        println!(
+            "  {:>6}  {}  {}  {}  {}",
+            iface.if_index,
+            fit_str(name_src, NAME_W),
+            fit_str(&ip_str, IP_W),
+            fit_str(inject_str, INJECT_W),
             truncate_str(&iface.description, DESC_W),
         );
     }
@@ -342,4 +406,42 @@ fn c_bytes_to_string(bytes: &[i8]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     let u8_slice: Vec<u8> = bytes[..end].iter().map(|&b| b as u8).collect();
     String::from_utf8_lossy(&u8_slice).into_owned()
+}
+
+/// Probe whether the npcap injection handle on `pcap_device` accepts raw frame
+/// injection in promiscuous mode.
+///
+/// Sends a minimal Ethernet frame with a deliberately invalid dst MAC
+/// (00:00:00:00:00:01) — no real device will respond, so the probe is
+/// network-silent.  Returns `true` if `sendpacket` succeeds, `false` if the
+/// driver rejects it (e.g. Intel NDIS filtering).
+///
+/// Call this once during server startup to decide between direct npcap
+/// injection and the TAP+Bridge fallback path.
+pub fn probe_inject(pcap_device: &str) -> bool {
+    // Minimal valid Ethernet frame: 14-byte header + 46-byte zero payload = 60B.
+    // dst: 00:00:00:00:00:01  (invalid unicast — won't be processed by anyone)
+    // src: 00:00:00:00:00:02  (placeholder)
+    // EtherType: 0x9000 (loopback — harmless, ignored by all stacks)
+    let mut frame = vec![0u8; 60];
+    frame[0] = 0x00; frame[1] = 0x00; frame[2] = 0x00;
+    frame[3] = 0x00; frame[4] = 0x00; frame[5] = 0x01; // dst MAC
+    frame[6] = 0x00; frame[7] = 0x00; frame[8] = 0x00;
+    frame[9] = 0x00; frame[10] = 0x00; frame[11] = 0x02; // src MAC
+    frame[12] = 0x90; frame[13] = 0x00;                  // EtherType 0x9000
+
+    let result = pcap::Capture::from_device(pcap_device)
+        .and_then(|b| b.promisc(true).snaplen(128).timeout(100).open())
+        .and_then(|mut cap| cap.sendpacket(frame.as_slice()));
+
+    match result {
+        Ok(()) => {
+            log::debug!("inject probe on {}: OK — driver accepts raw injection", pcap_device);
+            true
+        }
+        Err(e) => {
+            log::debug!("inject probe on {}: FAILED ({e}) — driver rejects raw injection", pcap_device);
+            false
+        }
+    }
 }

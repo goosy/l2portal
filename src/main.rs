@@ -119,6 +119,15 @@ async fn run() -> Result<()> {
         return Ok(());
     }
 
+    // ── --probe ───────────────────────────────────────────────────────────
+    if args.probe {
+        let ifaces = iface::list_interfaces()
+            .context("[ERROR] main: failed to enumerate interfaces")?;
+        eprintln!("Probing injection support for {} interface(s) — this may take a few seconds...", ifaces.len());
+        iface::print_probe_list(&ifaces);
+        return Ok(());
+    }
+
     // ── Require --local and --remote for all tunnel modes ─────────────────
     let local_str = args
         .local
